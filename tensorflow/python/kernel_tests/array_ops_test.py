@@ -1,4 +1,4 @@
-# Copyright 2015 Google Inc. All Rights Reserved.
+# Copyright 2015 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,6 +22,8 @@ import math
 
 import numpy as np
 
+import tensorflow as tf
+
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors
 from tensorflow.python.framework import test_util
@@ -31,14 +33,12 @@ from tensorflow.python.platform import googletest
 
 class BooleanMaskTest(test_util.TensorFlowTestCase):
 
-  def CheckVersusNumpy(self, ndims_mask, arr_shape):
+  def CheckVersusNumpy(self, ndims_mask, arr_shape, make_mask=None):
     """Check equivalence between boolean_mask and numpy masking."""
-    arr_size = arr_shape.prod()
-    arr = np.random.rand(arr_size).reshape(arr_shape)
-    mask_shape = arr_shape[: ndims_mask]
-    mask_size = mask_shape.prod()
-    mask = np.random.randint(
-        0, 2, size=mask_size).reshape(mask_shape).astype(bool)
+    if make_mask is None:
+      make_mask = lambda shape: np.random.randint(0, 2, size=shape).astype(bool)
+    arr = np.random.rand(*arr_shape)
+    mask = make_mask(arr_shape[: ndims_mask])
     masked_arr = arr[mask]
     with self.test_session():
       masked_tensor = array_ops.boolean_mask(arr, mask)
@@ -47,6 +47,12 @@ class BooleanMaskTest(test_util.TensorFlowTestCase):
           masked_tensor.eval(),
           err_msg="masked_arr:\n%s\n\nmasked_tensor:\n%s" % (
               masked_arr, masked_tensor.eval()))
+      masked_tensor.get_shape().assert_is_compatible_with(masked_arr.shape)
+      self.assertSequenceEqual(
+          masked_tensor.get_shape()[1:].as_list(),
+          masked_arr.shape[1:],
+          msg="shape information lost %s -> %s" % (
+              masked_arr.shape, masked_tensor.get_shape()))
 
   def testOneDimensionalMask(self):
     # Do 1d separately because it's the only easy one to debug!
@@ -63,11 +69,19 @@ class BooleanMaskTest(test_util.TensorFlowTestCase):
           arr_shape = np.random.randint(1, 5, size=ndims_arr)
           self.CheckVersusNumpy(ndims_mask, arr_shape)
 
+  def testEmptyOutput(self):
+    make_mask = lambda shape: np.zeros(shape, dtype=bool)
+    for ndims_mask in range(1, 4):
+      for ndims_arr in range(ndims_mask, ndims_mask + 3):
+        for _ in range(3):
+          arr_shape = np.random.randint(1, 5, size=ndims_arr)
+          self.CheckVersusNumpy(ndims_mask, arr_shape, make_mask=make_mask)
+
   def testWorksWithDimensionsEqualToNoneDuringGraphBuild(self):
-    # The leading dimensions of tensor can be None, allowing for minibatch size
-    # None.  This is explained in the docstring as well.
+    # The rank of the mask tensor must be specified. This is explained
+    # in the docstring as well.
     with self.test_session() as sess:
-      ph_tensor = array_ops.placeholder(dtypes.int32, shape=[None, 2])
+      ph_tensor = array_ops.placeholder(dtypes.int32, shape=None)
       ph_mask = array_ops.placeholder(dtypes.bool, shape=[None])
 
       arr = np.array([[1, 2], [3, 4]])
@@ -79,8 +93,8 @@ class BooleanMaskTest(test_util.TensorFlowTestCase):
       np.testing.assert_allclose(masked_tensor, arr[mask])
 
   def testMaskDimensionsSetToNoneRaises(self):
-    # The leading dimensions of tensor can be None, allowing for minibatch size
-    # None.  This is explained in the docstring as well.
+    # The rank of the mask tensor must be specified. This is explained
+    # in the docstring as well.
     with self.test_session():
       tensor = array_ops.placeholder(dtypes.int32, shape=[None, 2])
       mask = array_ops.placeholder(dtypes.bool, shape=None)
@@ -138,6 +152,60 @@ class ReverseTest(test_util.TensorFlowTestCase):
       with self.test_session(use_gpu=use_gpu):
         x_tf = array_ops.reverse(x_np, [True]).eval()
         self.assertAllEqual(x_tf, np.asarray(x_np)[::-1])
+
+  def testUnknownDims(self):
+    data_t = tf.placeholder(tf.float32)
+    dims_known_t = tf.placeholder(tf.bool, shape=[3])
+    reverse_known_t = tf.reverse(data_t, dims_known_t)
+    self.assertEqual(3, reverse_known_t.get_shape().ndims)
+
+    dims_unknown_t = tf.placeholder(tf.bool)
+    reverse_unknown_t = tf.reverse(data_t, dims_unknown_t)
+    self.assertIs(None, reverse_unknown_t.get_shape().ndims)
+
+    data_2d_t = tf.placeholder(tf.float32, shape=[None, None])
+    dims_2d_t = tf.placeholder(tf.bool, shape=[2])
+    reverse_2d_t = tf.reverse(data_2d_t, dims_2d_t)
+    self.assertEqual(2, reverse_2d_t.get_shape().ndims)
+
+    dims_3d_t = tf.placeholder(tf.bool, shape=[3])
+    with self.assertRaisesRegexp(ValueError, "must have rank 3"):
+      tf.reverse(data_2d_t, dims_3d_t)
+
+
+class MeshgridTest(test_util.TensorFlowTestCase):
+
+  def _compare(self, n, np_dtype, use_gpu):
+    inputs = []
+    for i in range(n):
+      x = np.linspace(-10, 10, 5).astype(np_dtype)
+      if np_dtype in (np.complex64, np.complex128):
+        x += 1j
+      inputs.append(x)
+
+    numpy_out = np.meshgrid(*inputs)
+    with self.test_session(use_gpu=use_gpu):
+      tf_out = array_ops.meshgrid(*inputs)
+      for X, _X in zip(numpy_out, tf_out):
+        self.assertAllEqual(X, _X.eval())
+
+  def testCompare(self):
+    for t in (np.float16, np.float32, np.float64, np.int32, np.int64,
+            np.complex64, np.complex128):
+      # Don't test the one-dimensional case, as
+      # old numpy versions don't support it
+      self._compare(2, t, False)
+      self._compare(3, t, False)
+      self._compare(4, t, False)
+      self._compare(5, t, False)
+
+    # Test for inputs with rank not equal to 1
+    x = [[1, 1], [1, 1]]
+    with self.assertRaisesRegexp(errors.InvalidArgumentError,
+                                 "needs to have rank 1"):
+      with self.test_session():
+        X, _ = array_ops.meshgrid(x, x)
+        X.eval()
 
 
 if __name__ == "__main__":

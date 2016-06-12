@@ -1,4 +1,4 @@
-/* Copyright 2015 Google Inc. All Rights Reserved.
+/* Copyright 2015 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -102,6 +102,8 @@ void EventsWriter::WriteSerializedEvent(StringPiece event_str) {
   recordio_writer_->WriteRecord(event_str);
 }
 
+// NOTE(touts); This is NOT the function called by the Python code.
+// Python calls WriteSerializedEvent(), see events_writer.i.
 void EventsWriter::WriteEvent(const Event& event) {
   string record;
   event.AppendToString(&record);
