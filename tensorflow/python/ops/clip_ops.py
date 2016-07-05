@@ -22,10 +22,10 @@ import collections
 
 import six
 
+from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_ops
-from tensorflow.python.ops import constant_op
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import nn_ops
 
@@ -99,7 +99,8 @@ def clip_by_norm(t, clip_norm, axes=None, name=None):
     l2norm_inv = math_ops.rsqrt(
         math_ops.reduce_sum(t * t, axes, keep_dims=True))
     tclip = array_ops.identity(t * clip_norm * math_ops.minimum(
-        l2norm_inv, constant_op.constant(1.0 / clip_norm)), name=name)
+        l2norm_inv, constant_op.constant(1.0, dtype=t.dtype) / clip_norm),
+                               name=name)
 
   return tclip
 

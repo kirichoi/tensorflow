@@ -41,8 +41,7 @@ ZlibInputBuffer::ZlibInputBuffer(
   z_stream_->next_in = Z_NULL;
   z_stream_->avail_in = 0;
 
-  // TODO(srbs): Move windowBits to compression options.
-  int status = inflateInit2(z_stream_.get(), -MAX_WBITS);
+  int status = inflateInit2(z_stream_.get(), zlib_options_.window_bits);
   if (status != Z_OK) {
     LOG(FATAL) << "inflateInit failed with status " << status;
     z_stream_.reset(NULL);
@@ -129,6 +128,7 @@ size_t ZlibInputBuffer::NumUnreadBytes() const {
 }
 
 Status ZlibInputBuffer::ReadNBytes(int64 bytes_to_read, string* result) {
+  result->clear();
   // Read as many bytes as possible from cache.
   bytes_to_read -= ReadBytesFromCache(bytes_to_read, result);
 
@@ -164,8 +164,8 @@ Status ZlibInputBuffer::ReadNBytes(int64 bytes_to_read, string* result) {
 Status ZlibInputBuffer::Inflate() {
   int error = inflate(z_stream_.get(), zlib_options_.flush_mode);
   if (error != Z_OK && error != Z_FINISH) {
-    string error_string = strings::StrCat("inflate() failed with error ",
-                                          std::to_string(error).c_str());
+    string error_string =
+        strings::StrCat("inflate() failed with error ", error);
     if (z_stream_->msg != NULL) {
       strings::StrAppend(&error_string, ": ", z_stream_->msg);
     }

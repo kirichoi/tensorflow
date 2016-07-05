@@ -32,7 +32,7 @@ py_library(
     deps = [
         ":gc",
         ":manifest_proto_py",
-        "//tensorflow:tensorflow_py",
+        "//tensorflow/python:framework",
     ],
 )
 
@@ -57,7 +57,7 @@ py_library(
     srcs = ["gc.py"],
     srcs_version = "PY2AND3",
     deps = [
-        "//tensorflow:tensorflow_py",
+        "//tensorflow/python:framework",
     ],
 )
 
@@ -161,6 +161,5 @@ tf_proto_library(
     name = "manifest_proto",
     srcs = ["manifest.proto"],
     cc_api_version = 2,
-    py_api_version = 2,
     visibility = ["//visibility:public"],
 )
