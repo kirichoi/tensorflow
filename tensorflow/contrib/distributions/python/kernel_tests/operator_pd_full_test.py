@@ -20,7 +20,7 @@ from __future__ import print_function
 import numpy as np
 import tensorflow as tf
 
-distributions = tf.contrib.distributions
+from tensorflow.contrib.distributions.python.ops import operator_pd_full
 
 
 class OperatorPDFullTest(tf.test.TestCase):
@@ -37,26 +37,26 @@ class OperatorPDFullTest(tf.test.TestCase):
   def test_positive_definite_matrix_doesnt_raise(self):
     with self.test_session():
       matrix = self._random_positive_def_array(2, 3, 3)
-      operator = distributions.OperatorPDFull(matrix, verify_pd=True)
+      operator = operator_pd_full.OperatorPDFull(matrix, verify_pd=True)
       operator.to_dense().eval()  # Should not raise
 
   def test_negative_definite_matrix_raises(self):
     with self.test_session():
       matrix = -1 * self._random_positive_def_array(3, 2, 2)
-      operator = distributions.OperatorPDFull(matrix, verify_pd=True)
+      operator = operator_pd_full.OperatorPDFull(matrix, verify_pd=True)
       # Could fail inside Cholesky decomposition, or later when we test the
       # diag.
-      with self.assertRaisesOpError('x > 0|LLT'):
+      with self.assertRaisesOpError("x > 0|LLT"):
         operator.to_dense().eval()
 
   def test_non_symmetric_matrix_raises(self):
     with self.test_session():
       matrix = self._random_positive_def_array(3, 2, 2)
       matrix[0, 0, 1] += 0.001
-      operator = distributions.OperatorPDFull(matrix, verify_pd=True)
-      with self.assertRaisesOpError('x == y'):
+      operator = operator_pd_full.OperatorPDFull(matrix, verify_pd=True)
+      with self.assertRaisesOpError("x == y"):
         operator.to_dense().eval()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
   tf.test.main()

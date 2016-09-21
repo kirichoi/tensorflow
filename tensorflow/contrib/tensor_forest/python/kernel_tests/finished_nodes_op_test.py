@@ -31,15 +31,15 @@ class FinishedNodesTest(test_util.TensorFlowTestCase):
     self.leaves = [1, 3, 4]
     self.node_map = [-1, -1, -1, 0, 1, -1]
     self.split_sums = [
-        # Accumulator 1
+        # Accumulator 0
         [[3, 0, 3], [2, 1, 1], [3, 1, 2]],
-        # Accumulator 2
+        # Accumulator 1
         [[6, 3, 3], [6, 2, 4], [5, 0, 5]],
+        # Accumulator 2
+        [[0, 0, 0], [0, 0, 0], [0, 0, 0]],
         # Accumulator 3
         [[0, 0, 0], [0, 0, 0], [0, 0, 0]],
         # Accumulator 4
-        [[0, 0, 0], [0, 0, 0], [0, 0, 0]],
-        # Accumulator 5
         [[0, 0, 0], [0, 0, 0], [0, 0, 0]]
     ]
     self.split_squares = []
@@ -57,6 +57,24 @@ class FinishedNodesTest(test_util.TensorFlowTestCase):
           self.split_squares, self.accumulator_sums, self.accumulator_squares,
           self.birth_epochs, self.current_epoch,
           regression=False, num_split_after_samples=10, min_split_samples=10)
+
+      self.assertAllEqual([4], finished.eval())
+      self.assertAllEqual([], stale.eval())
+
+  def testLeavesCanBeNegativeOne(self):
+    with self.test_session():
+      finished, stale = self.ops.finished_nodes(
+          [-1, -1, 1, -1, 3, -1, -1, 4, -1, -1, -1],
+          self.node_map,
+          self.split_sums,
+          self.split_squares,
+          self.accumulator_sums,
+          self.accumulator_squares,
+          self.birth_epochs,
+          self.current_epoch,
+          regression=False,
+          num_split_after_samples=10,
+          min_split_samples=10)
 
       self.assertAllEqual([4], finished.eval())
       self.assertAllEqual([], stale.eval())

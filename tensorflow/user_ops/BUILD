@@ -29,6 +29,7 @@ py_tests(
     name = "ackermann_test",
     size = "small",
     srcs = ["ackermann_test.py"],
+    additional_deps = ["//tensorflow:tensorflow_py"],
     data = [":ackermann_op.so"],
 )
 
@@ -41,7 +42,21 @@ py_tests(
     name = "duplicate_op_test",
     size = "small",
     srcs = ["duplicate_op_test.py"],
+    additional_deps = ["//tensorflow:tensorflow_py"],
     data = [":duplicate_op.so"],
+)
+
+tf_custom_op_library(
+    name = "invalid_op.so",
+    srcs = ["invalid_op.cc"],
+)
+
+py_tests(
+    name = "invalid_op_test",
+    size = "small",
+    srcs = ["invalid_op_test.py"],
+    additional_deps = ["//tensorflow:tensorflow_py"],
+    data = [":invalid_op.so"],
 )
 
 filegroup(

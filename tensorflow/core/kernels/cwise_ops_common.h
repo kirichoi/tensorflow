@@ -65,7 +65,7 @@ class BinaryOpShared : public OpKernel {
 
 // Coefficient-wise binary operations:
 //   Device: E.g., CPUDevice, GPUDevice.
-//   Functor: defined in cwise_functors.h. E.g., functor::add2.
+//   Functor: defined in cwise_ops.h. E.g., functor::add.
 template <typename Device, typename Functor>
 class BinaryOp : public BinaryOpShared {
  public:
@@ -122,6 +122,20 @@ class BinaryOp : public BinaryOpShared {
           BCast::ToIndexArray<3>(bcast->x_bcast()),
           in1.shaped<Tin, 3>(bcast->y_reshape()),
           BCast::ToIndexArray<3>(bcast->y_bcast()), error_ptr);
+    } else if (ndims == 4) {
+      functor::BinaryFunctor<Device, Functor, 4>().BCast(
+          eigen_device, out->shaped<Tout, 4>(bcast->result_shape()),
+          in0.shaped<Tin, 4>(bcast->x_reshape()),
+          BCast::ToIndexArray<4>(bcast->x_bcast()),
+          in1.shaped<Tin, 4>(bcast->y_reshape()),
+          BCast::ToIndexArray<4>(bcast->y_bcast()), error_ptr);
+    } else if (ndims == 5) {
+      functor::BinaryFunctor<Device, Functor, 5>().BCast(
+          eigen_device, out->shaped<Tout, 5>(bcast->result_shape()),
+          in0.shaped<Tin, 5>(bcast->x_reshape()),
+          BCast::ToIndexArray<5>(bcast->x_bcast()),
+          in1.shaped<Tin, 5>(bcast->y_reshape()),
+          BCast::ToIndexArray<5>(bcast->y_bcast()), error_ptr);
     } else {
       SetUnimplementedError(ctx);
     }
@@ -162,7 +176,7 @@ class SimpleBinaryOp : public OpKernel {
 
 // Coefficient-wise unary operations:
 //   Device: E.g., CPUDevice, GPUDevice.
-//   Functor: defined in cwise_functors.h. E.g., functor::sqrt.
+//   Functor: defined in cwise_ops.h. E.g., functor::sqrt.
 template <typename Device, typename Functor>
 class UnaryOp : public OpKernel {
  public:

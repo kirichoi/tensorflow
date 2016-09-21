@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Tests for ContinuousTransformedDistribution."""
+"""Tests for TransformedDistribution."""
 
 from __future__ import absolute_import
 from __future__ import division
@@ -23,38 +23,56 @@ from scipy import stats
 import tensorflow as tf
 
 
-class ContinuousTransformedDistributionTest(tf.test.TestCase):
+class TransformedDistributionTest(tf.test.TestCase):
 
-  def testContinuousTransformedDistribution(self):
+  def testTransformedDistribution(self):
     with self.test_session():
       mu = 3.0
-      sigma = 0.02
-      log_normal = tf.contrib.distributions.ContinuousTransformedDistribution(
+      sigma = 2.0
+      log_normal = tf.contrib.distributions.TransformedDistribution(
           base_dist_cls=tf.contrib.distributions.Normal,
           mu=mu,
           sigma=sigma,
           transform=lambda x: tf.exp(x),
           inverse=lambda y: tf.log(y),
           log_det_jacobian=(lambda x: tf.reduce_sum(x)))
+      sp_dist = stats.lognorm(s=sigma, scale=np.exp(mu))
 
       # sample
-      self.assertAllClose([stats.lognorm.mean(s=sigma, scale=np.exp(mu))],
-                          [np.mean(log_normal.sample(100000, seed=235).eval())],
-                          atol=1e-2)
+      self.assertAllClose(
+          sp_dist.mean(),
+          np.mean(log_normal.sample_n(100000, seed=235).eval()),
+          atol=0.0, rtol=0.05)
 
-      # pdf, log_pdf
-      test_vals = np.linspace(0.00001, 10.).astype(np.float32)
+      # pdf, log_pdf, cdf, etc...
+      # The mean of the lognormal is around 148.
+      test_vals = np.linspace(0.1, 1000., num=20).astype(np.float32)
       for test_val in test_vals:
-        expected = stats.lognorm.logpdf(test_val, s=sigma, scale=np.exp(mu))
-        self.assertAllClose([expected], [log_normal.log_pdf(test_val).eval()])
-        self.assertAllClose([np.exp(expected)],
-                            [log_normal.pdf(test_val).eval()])
+        self.assertAllClose(
+            sp_dist.logpdf(test_val),
+            log_normal.log_pdf(test_val).eval(), atol=0, rtol=0.01)
+        self.assertAllClose(
+            sp_dist.pdf(test_val),
+            log_normal.pdf(test_val).eval(), atol=0, rtol=0.01)
+        self.assertAllClose(
+            sp_dist.cdf(test_val),
+            log_normal.cdf(test_val).eval(), atol=0, rtol=0.01)
+        self.assertAllClose(
+            sp_dist.logcdf(test_val),
+            log_normal.log_cdf(test_val).eval(), atol=0, rtol=0.01)
+        self.assertAllClose(
+            sp_dist.sf(test_val),
+            log_normal.survival_function(test_val).eval(), atol=0, rtol=0.01)
+        self.assertAllClose(
+            sp_dist.logsf(test_val),
+            log_normal.log_survival_function(test_val).eval(),
+            atol=0, rtol=0.01)
 
   def testCachedSamplesWithoutInverse(self):
     with self.test_session() as sess:
       mu = 3.0
       sigma = 0.02
-      log_normal = tf.contrib.distributions.ContinuousTransformedDistribution(
+      log_normal = tf.contrib.distributions.TransformedDistribution(
           base_dist_cls=tf.contrib.distributions.Normal,
           mu=mu,
           sigma=sigma,
@@ -62,7 +80,7 @@ class ContinuousTransformedDistributionTest(tf.test.TestCase):
           inverse=None,
           log_det_jacobian=(lambda x: tf.reduce_sum(x)))
 
-      sample = log_normal.sample(1)
+      sample = log_normal.sample_n(1)
       sample_val, log_pdf_val = sess.run([sample, log_normal.log_pdf(sample)])
       self.assertAllClose(
           stats.lognorm.logpdf(sample_val, s=sigma,
