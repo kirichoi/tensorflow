@@ -21,6 +21,7 @@ from __future__ import division
 from __future__ import print_function
 
 import functools
+import six
 
 from tensorflow.contrib.framework.python.ops import add_arg_scope
 from tensorflow.contrib.framework.python.ops import variables
@@ -31,9 +32,11 @@ from tensorflow.contrib.layers.python.layers import utils
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import check_ops
 from tensorflow.python.ops import init_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import nn
+from tensorflow.python.ops import sparse_ops
 from tensorflow.python.ops import standard_ops
 from tensorflow.python.ops import variable_scope
 from tensorflow.python.training import moving_averages
@@ -52,6 +55,7 @@ __all__ = ['avg_pool2d',
            'dropout',
            'flatten',
            'fully_connected',
+           '_inner_flatten',
            'layer_norm',
            'linear',
            'max_pool2d',
@@ -113,6 +117,7 @@ def batch_norm(inputs,
                scale=False,
                epsilon=0.001,
                activation_fn=None,
+               initializers={},
                updates_collections=ops.GraphKeys.UPDATE_OPS,
                is_training=True,
                reuse=None,
@@ -193,39 +198,43 @@ def batch_norm(inputs,
     if center:
       beta_collections = utils.get_variable_collections(variables_collections,
                                                         'beta')
+      beta_initializer = initializers.get('beta', init_ops.zeros_initializer)
       beta = variables.model_variable('beta',
                                       shape=params_shape,
                                       dtype=dtype,
-                                      initializer=init_ops.zeros_initializer,
+                                      initializer=beta_initializer,
                                       collections=beta_collections,
                                       trainable=trainable)
     if scale:
       gamma_collections = utils.get_variable_collections(variables_collections,
                                                          'gamma')
+      gamma_initializer = initializers.get('gamma', init_ops.ones_initializer)
       gamma = variables.model_variable('gamma',
                                        shape=params_shape,
                                        dtype=dtype,
-                                       initializer=init_ops.ones_initializer,
+                                       initializer=gamma_initializer,
                                        collections=gamma_collections,
                                        trainable=trainable)
     # Create moving_mean and moving_variance variables and add them to the
     # appropiate collections.
     moving_mean_collections = utils.get_variable_collections(
         variables_collections, 'moving_mean')
+    moving_mean_initializer = initializers.get('moving_mean', init_ops.zeros_initializer)
     moving_mean = variables.model_variable(
         'moving_mean',
         shape=params_shape,
         dtype=dtype,
-        initializer=init_ops.zeros_initializer,
+        initializer=moving_mean_initializer,
         trainable=False,
         collections=moving_mean_collections)
     moving_variance_collections = utils.get_variable_collections(
         variables_collections, 'moving_variance')
+    moving_variance_initializer = initializers.get('moving_variance', init_ops.ones_initializer)
     moving_variance = variables.model_variable(
         'moving_variance',
         shape=params_shape,
         dtype=dtype,
-        initializer=init_ops.ones_initializer,
+        initializer=moving_variance_initializer,
         trainable=False,
         collections=moving_variance_collections)
 
@@ -716,7 +725,7 @@ def dropout(inputs,
   with ops.name_scope(scope, 'Dropout', [inputs]) as sc:
     inputs = ops.convert_to_tensor(inputs)
     dropout_fn = lambda: nn.dropout(inputs, keep_prob, noise_shape)
-    id_fn = lambda: inputs
+    id_fn = lambda: array_ops.identity(inputs)
     outputs = utils.smart_cond(is_training, dropout_fn, id_fn)
     return utils.collect_named_outputs(outputs_collections, sc, outputs)
 
@@ -751,6 +760,77 @@ def flatten(inputs,
     k = dims.num_elements()
     outputs = array_ops.reshape(inputs, [-1, k])
     return utils.collect_named_outputs(outputs_collections, sc, outputs)
+
+
+def _sparse_inner_flatten(inputs, new_rank):
+  """Helper function for `inner_flatten`."""
+  outer_dimensions = array_ops.slice(
+      inputs.shape, [0], [new_rank - 1], name='collect_outer_dims')
+  new_shape = array_ops.concat(0, (outer_dimensions, [-1]))
+  flattened = sparse_ops.sparse_reshape(inputs, new_shape)
+  return flattened
+
+
+def _dense_inner_flatten(inputs, new_rank):
+  """Helper function for `inner_flatten`."""
+  rank_assertion = check_ops.assert_rank_at_least(
+      inputs, new_rank, message='inputs has rank less than new_rank')
+  with ops.control_dependencies([rank_assertion]):
+    outer_dimensions = array_ops.slice(
+        array_ops.shape(inputs), [0], [new_rank - 1])
+    new_shape = array_ops.concat(0, (outer_dimensions, [-1]))
+    reshaped = array_ops.reshape(inputs, new_shape)
+
+  # if `new_rank` is an integer, try to calculate new shape.
+  if isinstance(new_rank, six.integer_types):
+    static_shape = inputs.get_shape()
+    if static_shape is not None and static_shape.dims is not None:
+      static_shape = static_shape.as_list()
+      static_outer_dims = static_shape[:new_rank - 1]
+      static_inner_dims = static_shape[new_rank - 1:]
+      flattened_dimension = 1
+      for inner_dim in static_inner_dims:
+        if inner_dim is None:
+          flattened_dimension = None
+          break
+        flattened_dimension *= inner_dim
+      reshaped.set_shape(static_outer_dims + [flattened_dimension])
+  return reshaped
+
+
+@add_arg_scope
+def _inner_flatten(inputs, new_rank, output_collections=None, scope=None):
+  """Flattens inner dimensions of `inputs`, returns a Tensor with `new_rank`.
+
+  For example:
+  '''
+      x = tf.random_uniform(shape=[1, 2, 3, 4, 5, 6])
+      y = _inner_flatten(x, 4)
+      assert y.get_shape().as_list() == [1, 2, 3, (4 * 5 * 6)]
+  '''
+  This layer will fail at run time if `new_rank` is greater than the current
+  rank of `inputs`.
+
+  Args:
+    inputs: a `Tensor` or `SparseTensor`.
+    new_rank: the desired rank of the returned `Tensor` or `SparseTensor`.
+    output_collections: collection to which the outputs will be added.
+    scope: optional scope for `name_scope`.
+  Returns:
+    A `Tensor` or `SparseTensor` conataining the same values as `inputs`, but
+    with innermost dimensions flattened to obtain rank `new_rank`.
+
+  Raises:
+    TypeError: `inputs` is not a `Tensor` or `SparseTensor`.
+  """
+  with ops.name_scope(scope, 'PartialFlatten', [inputs, new_rank]) as sc:
+    if isinstance(inputs, ops.SparseTensor):
+      flattened = _sparse_inner_flatten(inputs, new_rank)
+    elif isinstance(inputs, ops.Tensor):
+      flattened = _dense_inner_flatten(inputs, new_rank)
+    else:
+      raise TypeError('inputs must be a Tensor or SparseTensor.')
+  return utils.collect_named_outputs(output_collections, sc, flattened)
 
 
 @add_arg_scope

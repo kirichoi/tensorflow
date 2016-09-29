@@ -72,7 +72,7 @@ def rnn(cell, inputs, initial_state=None, dtype=None,
   """Creates a recurrent neural network specified by RNNCell `cell`.
 
   The simplest form of RNN network generated is:
-  ```py
+  ```python
     state = cell.zero_state(...)
     outputs = []
     for input_ in inputs:
@@ -89,11 +89,13 @@ def rnn(cell, inputs, initial_state=None, dtype=None,
   and properly propagates the state at an example's sequence length
   to the final state output.
 
-  The dynamic calculation performed is, at time t for batch row b,
+  The dynamic calculation performed is, at time `t` for batch row `b`,
+  ```python
     (output, state)(b, t) =
       (t >= sequence_length(b))
         ? (zeros(cell.output_size), states(b, sequence_length(b) - 1))
         : cell(input(b, t), state(b, t - 1))
+  ```
 
   Args:
     cell: An instance of RNNCell.
@@ -176,6 +178,11 @@ def rnn(cell, inputs, initial_state=None, dtype=None,
       state = cell.zero_state(batch_size, dtype)
 
     if sequence_length is not None:  # Prepare variables
+      sequence_length = ops.convert_to_tensor(
+          sequence_length, name="sequence_length")
+      if sequence_length.get_shape().ndims not in (None, 1):
+        raise ValueError(
+            "sequence_length must be a vector of length batch_size")
       def _create_zero_output(output_size):
         # convert int to TensorShape if necessary
         size = _state_size_with_prefix(output_size, prefix=[batch_size])
@@ -784,6 +791,10 @@ def dynamic_rnn(cell, inputs, sequence_length=None, initial_state=None,
   parallel_iterations = parallel_iterations or 32
   if sequence_length is not None:
     sequence_length = math_ops.to_int32(sequence_length)
+    if sequence_length.get_shape().ndims not in (None, 1):
+      raise ValueError(
+          "sequence_length must be a vector of length batch_size, "
+          "but saw shape: %s" % sequence_length.get_shape())
     sequence_length = array_ops.identity(  # Just to find it in the graph.
         sequence_length, name="sequence_length")
 

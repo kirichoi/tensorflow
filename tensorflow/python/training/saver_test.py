@@ -35,6 +35,7 @@ from google.protobuf.any_pb2 import Any
 from tensorflow.core.framework import graph_pb2
 from tensorflow.core.protobuf import meta_graph_pb2
 from tensorflow.core.protobuf import queue_runner_pb2
+from tensorflow.core.protobuf import saver_pb2
 from tensorflow.python.framework import errors
 from tensorflow.python.framework import function
 from tensorflow.python.ops import gen_data_flow_ops
@@ -186,6 +187,14 @@ class SaverTest(tf.test.TestCase):
       self.assertEqual(20.0, v1_2.eval())
       self.assertEqual(b"k1", v2_2.keys().eval())
       self.assertEqual(30.0, v2_2.values().eval())
+
+  def testInvalidPath(self):
+    v0 = tf.Variable(0, name="v0")
+    with self.test_session() as sess:
+      save = tf.train.Saver({"v0": v0})
+      with self.assertRaisesRegexp(ValueError,
+                                   "^Restore called with invalid save path.*"):
+        save.restore(sess, "invalid path")
 
   def testInt64(self):
     save_path = os.path.join(self.get_temp_dir(), "int64")
@@ -1541,7 +1550,7 @@ class MetaGraphTest(tf.test.TestCase):
       v0 = tf.Variable(0.0)
       var = tf.Variable(10.0)
       tf.add(v0, var)
-      @function.Defun(x=tf.float32)
+      @function.Defun(tf.float32)
       def minus_one(x):
         return x - 1
       minus_one(tf.identity(v0))
@@ -1552,7 +1561,7 @@ class MetaGraphTest(tf.test.TestCase):
       meta_graph_def = save.export_meta_graph()
       ops = [o.name for o in meta_graph_def.meta_info_def.stripped_op_list.op]
       self.assertEqual(ops, ["Add", "Assign", "Const", "Identity", "NoOp",
-                             "RestoreSlice", "SaveSlices", "Sub", "Variable"])
+                             "RestoreV2", "SaveSlices", "Sub", "Variable"])
 
       # Test calling stripped_op_list_for_graph directly
       op_list = tf.contrib.util.stripped_op_list_for_graph(
@@ -1606,14 +1615,19 @@ class MetaGraphTest(tf.test.TestCase):
 
 class CheckpointReaderTest(tf.test.TestCase):
 
+  _WRITE_VERSION = saver_pb2.SaverDef.V1
+
   def testDebugString(self):
     # Builds a graph.
     v0 = tf.Variable([[1, 2, 3], [4, 5, 6]], dtype=tf.float32, name="v0")
     v1 = tf.Variable([[[1], [2]], [[3], [4]], [[5], [6]]], dtype=tf.float32,
                      name="v1")
     init_all_op = tf.initialize_all_variables()
-    save = tf.train.Saver({"v0": v0, "v1": v1})
-    save_path = os.path.join(self.get_temp_dir(), "ckpt_for_debug_string")
+    save = tf.train.Saver(
+        {"v0": v0,
+         "v1": v1}, write_version=self._WRITE_VERSION)
+    save_path = os.path.join(self.get_temp_dir(),
+                             "ckpt_for_debug_string" + str(self._WRITE_VERSION))
     with self.test_session() as sess:
       sess.run(init_all_op)
       # Saves a checkpoint.
@@ -1639,13 +1653,18 @@ class CheckpointReaderTest(tf.test.TestCase):
       self.assertAllEqual(v1.eval(), v1_tensor)
       # Verifies get_tensor() fails for non-existent tensors.
       with self.assertRaisesRegexp(errors.NotFoundError,
-                                   "v3 not found in checkpoint file"):
+                                   "v3 not found in checkpoint"):
         reader.get_tensor("v3")
 
   def testNonexistentPath(self):
     with self.assertRaisesRegexp(errors.NotFoundError,
                                  "Unsuccessful TensorSliceReader"):
       tf.train.NewCheckpointReader("non-existent")
+
+
+class CheckpointReaderForV2Test(CheckpointReaderTest):
+
+  _WRITE_VERSION = saver_pb2.SaverDef.V2
 
 
 class WriteGraphTest(tf.test.TestCase):

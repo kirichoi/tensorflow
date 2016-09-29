@@ -77,6 +77,7 @@ from tensorflow.python.ops.standard_ops import *
 
 # Bring in subpackages.
 from tensorflow.python.ops import nn
+from tensorflow.python.ops import sdca_ops as sdca
 from tensorflow.python.ops import image_ops as image
 from tensorflow.python.user_ops import user_ops
 from tensorflow.python.util import compat
@@ -142,31 +143,23 @@ _allowed_symbols = [
     'RunMetadata',
     'SessionLog',
     'Summary',
+    'initialize_all_tables',
+]
+
+# The following symbols are kept for compatibility. It is our plan
+# to remove them in the future.
+_allowed_symbols.extend([
     'arg_max',
     'arg_min',
-    'assign',
-    'assign_add',
-    'assign_sub',
-    'bitcast',
-    'bytes',
-    'compat',
     'create_partitioned_variables',
     'deserialize_many_sparse',
-    'initialize_all_tables',
     'lin_space',
-    'list_diff',
+    'list_diff',  # Use tf.listdiff instead.
     'parse_single_sequence_example',
-    'py_func',
-    'scalar_mul',
     'serialize_many_sparse',
     'serialize_sparse',
-    'shape_n',
-    'sparse_matmul',
-    'sparse_segment_mean_grad',
-    'sparse_segment_sqrt_n_grad',
-    'unique_with_counts',
-    'user_ops',
-]
+    'sparse_matmul',   ## use tf.matmul instead.
+])
 
 # This is needed temporarily because we import it explicitly.
 _allowed_symbols.extend([
@@ -225,6 +218,7 @@ _allowed_symbols.extend([
 # Export modules and constants.
 _allowed_symbols.extend([
     'app',
+    'compat',
     'errors',
     'flags',
     'gfile',
@@ -234,10 +228,12 @@ _allowed_symbols.extend([
     'nn',
     'python_io',
     'resource_loader',
+    'sdca',
     'summary',
     'sysconfig',
     'test',
     'train',
+    'user_ops',
 ])
 
 # Variables framework.versions:
@@ -251,7 +247,7 @@ _allowed_symbols.extend([
 # referenced in the whitelist.
 remove_undocumented(__name__, _allowed_symbols,
                     [framework_lib, array_ops, client_lib, check_ops,
-                     constant_op, control_flow_ops, functional_ops,
+                     compat, constant_op, control_flow_ops, functional_ops,
                      histogram_ops, io_ops, math_ops, nn, script_ops,
                      session_ops, sparse_ops, state_ops, string_ops,
                      summary, tensor_array_ops, train])

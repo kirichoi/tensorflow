@@ -560,7 +560,7 @@ def _softmax(logits, compute_op, dim=-1, name=None):
 
 
 def softmax(logits, dim=-1, name=None):
-  """Computes softmax activations.
+  """Computes log softmax activations.
 
   For each batch `i` and class `j` we have
 
@@ -587,7 +587,7 @@ def log_softmax(logits, dim=-1, name=None):
 
   For each batch `i` and class `j` we have
 
-      logsoftmax = logits - log(reduce_sum(exp(logits), dim))
+      logsoftmax = logits - reduce_sum(exp(logits), dim)
 
   Args:
     logits: A non-empty `Tensor`. Must be one of the following types: `half`,
@@ -716,12 +716,14 @@ def sparse_softmax_cross_entropy_with_logits(logits, labels, name=None):
   labels of shape `[batch_size]`. But higher dimensions are supported.
 
   Args:
+
     logits: Unscaled log probabilities of rank `r` and shape
       `[d_0, d_1, ..., d_{r-2}, num_classes]` and dtype `float32` or `float64`.
     labels: `Tensor` of shape `[d_0, d_1, ..., d_{r-2}]` and dtype `int32` or
       `int64`. Each entry in `labels` must be an index in `[0, num_classes)`.
-      Other values will result in a loss of 0, but incorrect gradient
-      computations.
+      Other values will raise an exception when this op is run on CPU, and
+      return `NaN` for corresponding corresponding loss and gradient rows
+      on GPU.
     name: A name for the operation (optional).
 
   Returns:
@@ -876,34 +878,42 @@ ops.RegisterShape("BatchNormWithGlobalNormalization")(
     common_shapes.call_cpp_shape_fn)
 ops.RegisterShape("BatchNormWithGlobalNormalizationGrad")(
     common_shapes.call_cpp_shape_fn)
+ops.RegisterShape("FusedBatchNorm")(common_shapes.call_cpp_shape_fn)
+ops.RegisterShape("FusedBatchNormGrad")(common_shapes.call_cpp_shape_fn)
 ops.RegisterShape("Conv2D")(common_shapes.call_cpp_shape_fn)
 ops.RegisterShape("DepthwiseConv2dNative")(common_shapes.call_cpp_shape_fn)
 ops.RegisterShape("AvgPool")(common_shapes.call_cpp_shape_fn)
 ops.RegisterShape("MaxPool")(common_shapes.call_cpp_shape_fn)
 
 
-@ops.RegisterShape("FusedResizeAndPadConv2D")
-def _FusedResizeAndPadConv2DShape(op):
-  """Shape function for FusedResizeAndPadConv2D op."""
+def _CommonFusedConvCalculations(op, has_resize):
+  """Shape function for Fused*Conv2D ops."""
   # The bilinear resize shape calculation.
   input_shape = op.inputs[0].get_shape().with_rank(4)
-  unused_size_shape = op.inputs[1].get_shape().merge_with([2])
-  size = tensor_util.constant_value(op.inputs[1])
-  if size is not None:
-    height = size[0]
-    width = size[1]
+  if has_resize:
+    unused_size_shape = op.inputs[1].get_shape().merge_with([2])
+    size = tensor_util.constant_value(op.inputs[1])
+    if size is not None:
+      height = size[0]
+      width = size[1]
+    else:
+      height = None
+      width = None
+    resized_shape = tensor_shape.TensorShape(
+        [input_shape[0], height, width, input_shape[3]])
+    paddings_index = 2
+    filter_index = 3
   else:
-    height = None
-    width = None
-  resized_shape = tensor_shape.TensorShape(
-      [input_shape[0], height, width, input_shape[3]])
+    resized_shape = input_shape
+    paddings_index = 1
+    filter_index = 2
 
   # Calculates the effect of the padding.
-  paddings_shape = op.inputs[2].get_shape().with_rank(2)
+  paddings_shape = op.inputs[paddings_index].get_shape().with_rank(2)
   resized_shape = resized_shape.with_rank(paddings_shape[0].value)
   paddings_shape = paddings_shape.merge_with(
       tensor_shape.matrix(resized_shape.ndims, 2))
-  paddings = tensor_util.constant_value(op.inputs[2])
+  paddings = tensor_util.constant_value(op.inputs[paddings_index])
   if paddings is None:
     padded_shape = tensor_shape.unknown_shape(ndims=resized_shape.ndims)
   else:
@@ -915,7 +925,7 @@ def _FusedResizeAndPadConv2DShape(op):
     padded_shape = tensor_shape.TensorShape(output_dims)
 
   # Finally work out the convolution's effect.
-  filter_shape = op.inputs[3].get_shape().with_rank(4)
+  filter_shape = op.inputs[filter_index].get_shape().with_rank(4)
 
   batch_size = padded_shape[0]
   in_rows = padded_shape[1]
@@ -945,6 +955,18 @@ def _FusedResizeAndPadConv2DShape(op):
 
   output_shape = [batch_size, out_rows, out_cols, depth_out]
   return [tensor_shape.TensorShape(output_shape)]
+
+
+@ops.RegisterShape("FusedResizeAndPadConv2D")
+def _FusedResizeAndPadConv2DShape(op):
+  """Shape function for FusedResizeAndPadConv2D op."""
+  return _CommonFusedConvCalculations(op, True)
+
+
+@ops.RegisterShape("FusedPadConv2D")
+def _FusedPadConv2DShape(op):
+  """Shape function for FusedResizeAndPadConv2D op."""
+  return _CommonFusedConvCalculations(op, False)
 
 
 ops.RegisterShape("MaxPoolWithArgmax")(common_shapes.call_cpp_shape_fn)
