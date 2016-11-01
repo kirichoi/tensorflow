@@ -104,7 +104,7 @@ Creating a variable.
 
 - - -
 
-#### `tf.Variable.__init__(initial_value=None, trainable=True, collections=None, validate_shape=True, caching_device=None, name=None, variable_def=None, dtype=None)` {#Variable.__init__}
+#### `tf.Variable.__init__(initial_value=None, trainable=True, collections=None, validate_shape=True, caching_device=None, name=None, variable_def=None, dtype=None, expected_shape=None, import_scope=None)` {#Variable.__init__}
 
 Creates a new variable with value `initial_value`.
 
@@ -147,6 +147,10 @@ variable to its initial value.
 *  <b>`dtype`</b>: If set, initial_value will be converted to the given type.
     If `None`, either the datatype will be kept (if `initial_value` is
     a Tensor), or `convert_to_tensor` will decide.
+*  <b>`expected_shape`</b>: A TensorShape. If set, initial_value is expected
+    to have this shape.
+*  <b>`import_scope`</b>: Optional `string`. Name scope to add to the
+    `Variable.` Only used when initializing from protocol buffer.
 
 ##### Raises:
 
@@ -1084,7 +1088,7 @@ x ^ y = (x | y) & ~(x & y).
 
 - - -
 
-#### `tf.Variable.from_proto(variable_def)` {#Variable.from_proto}
+#### `tf.Variable.from_proto(variable_def, import_scope=None)` {#Variable.from_proto}
 
 Returns a `Variable` object created from `variable_def`.
 
@@ -1126,13 +1130,19 @@ variable.
 
 - - -
 
-#### `tf.Variable.to_proto()` {#Variable.to_proto}
+#### `tf.Variable.to_proto(export_scope=None)` {#Variable.to_proto}
 
 Converts a `Variable` to a `VariableDef` protocol buffer.
 
+##### Args:
+
+
+*  <b>`export_scope`</b>: Optional `string`. Name scope to remove.
+
 ##### Returns:
 
-  A `VariableDef` protocol buffer.
+  A `VariableDef` protocol buffer, or `None` if the `Variable` is not
+  in the specified name scope.
 
 
 - - -
@@ -1522,7 +1532,7 @@ protocol buffer file in the call to `save()`.
 
 - - -
 
-#### `tf.train.Saver.__init__(var_list=None, reshape=False, sharded=False, max_to_keep=5, keep_checkpoint_every_n_hours=10000.0, name=None, restore_sequentially=False, saver_def=None, builder=None, defer_build=False, allow_empty=False, write_version=1)` {#Saver.__init__}
+#### `tf.train.Saver.__init__(var_list=None, reshape=False, sharded=False, max_to_keep=5, keep_checkpoint_every_n_hours=10000.0, name=None, restore_sequentially=False, saver_def=None, builder=None, defer_build=False, allow_empty=False, write_version=2, pad_step_number=False)` {#Saver.__init__}
 
 Creates a `Saver`.
 
@@ -1595,6 +1605,9 @@ checkpoints per device.
     currently, and will be switched to the more memory-efficient V2 format
     in the future.  If set to V2, the Saver is still able to restore from
     old V1 checkpoints.
+*  <b>`pad_step_number`</b>: if True, pads the global step number in the checkpoint
+    filepaths to some fixed width (8 by default).  This is turned off by
+    default.
 
 ##### Raises:
 
@@ -1605,7 +1618,7 @@ checkpoints per device.
 
 - - -
 
-#### `tf.train.Saver.save(sess, save_path, global_step=None, latest_filename=None, meta_graph_suffix='meta', write_meta_graph=True)` {#Saver.save}
+#### `tf.train.Saver.save(sess, save_path, global_step=None, latest_filename=None, meta_graph_suffix='meta', write_meta_graph=True, write_state=True)` {#Saver.save}
 
 Saves variables.
 
@@ -1633,6 +1646,8 @@ path can be passed directly to a call to `restore()`.
 *  <b>`meta_graph_suffix`</b>: Suffix for `MetaGraphDef` file. Defaults to 'meta'.
 *  <b>`write_meta_graph`</b>: `Boolean` indicating whether or not to write the meta
     graph file.
+*  <b>`write_state`</b>: `Boolean` indicating whether or not to write the
+    `CheckpointStateProto`.
 
 ##### Returns:
 
@@ -1673,7 +1688,8 @@ The `save_path` argument is typically a value previously returned from a
 ##### Raises:
 
 
-*  <b>`ValueError`</b>: If the given `save_path` does not point to a file.
+*  <b>`ValueError`</b>: DEPRECATED, do not rely on this Error.  If the given
+    `save_path` does not point to a file.
 
 
 
@@ -1749,7 +1765,7 @@ Builds saver_def.
 
 - - -
 
-#### `tf.train.Saver.export_meta_graph(filename=None, collection_list=None, as_text=False)` {#Saver.export_meta_graph}
+#### `tf.train.Saver.export_meta_graph(filename=None, collection_list=None, as_text=False, export_scope=None)` {#Saver.export_meta_graph}
 
 Writes `MetaGraphDef` to save_path/filename.
 
@@ -1759,6 +1775,7 @@ Writes `MetaGraphDef` to save_path/filename.
 *  <b>`filename`</b>: Optional meta_graph filename including the path.
 *  <b>`collection_list`</b>: List of string keys to collect.
 *  <b>`as_text`</b>: If `True`, writes the meta_graph as an ASCII proto.
+*  <b>`export_scope`</b>: Optional `string`. Name scope to remove.
 
 ##### Returns:
 
@@ -1767,9 +1784,19 @@ Writes `MetaGraphDef` to save_path/filename.
 
 - - -
 
-#### `tf.train.Saver.from_proto(saver_def)` {#Saver.from_proto}
+#### `tf.train.Saver.from_proto(saver_def, import_scope=None)` {#Saver.from_proto}
 
 Returns a `Saver` object created from `saver_def`.
+
+##### Args:
+
+
+*  <b>`saver_def`</b>: a `SaveDef` protocol buffer.
+*  <b>`import_scope`</b>: Optional `string`. Name scope to use.
+
+##### Returns:
+
+  A `Saver` built from saver_def.
 
 
 - - -
@@ -1793,9 +1820,14 @@ Sets the list of old checkpoint filenames.
 
 - - -
 
-#### `tf.train.Saver.to_proto()` {#Saver.to_proto}
+#### `tf.train.Saver.to_proto(export_scope=None)` {#Saver.to_proto}
 
 Converts this `Saver` to a `SaverDef` protocol buffer.
+
+##### Args:
+
+
+*  <b>`export_scope`</b>: Optional `string`. Name scope to remove.
 
 ##### Returns:
 
@@ -1912,9 +1944,9 @@ Similarly, if the regularizer is `None` (the default), the default regularizer
 passed in the variable scope will be used (if that is `None` too,
 then by default no regularization is performed).
 
-If a partitioner is provided, first a sharded `Variable` is created
-via `_get_partitioned_variable`, and the return value is a
-`Tensor` composed of the shards concatenated along the partition axis.
+If a partitioner is provided, a `PartitionedVariable` is returned.
+Accessing this object as a `Tensor` returns the shards concatenated along
+the partition axis.
 
 Some useful partitioners are available.  See, e.g.,
 `variable_axis_size_partitioner` and `min_max_variable_partitioner`.
@@ -1930,9 +1962,9 @@ Some useful partitioners are available.  See, e.g.,
     applying it on a newly created variable will be added to the collection
     GraphKeys.REGULARIZATION_LOSSES and can be used for regularization.
 *  <b>`trainable`</b>: If `True` also add the variable to the graph collection
-    `GraphKeys.TRAINABLE_VARIABLES` (see tf.Variable).
+    `GraphKeys.TRAINABLE_VARIABLES` (see `tf.Variable`).
 *  <b>`collections`</b>: List of graph collections keys to add the Variable to.
-    Defaults to `[GraphKeys.VARIABLES]` (see tf.Variable).
+    Defaults to `[GraphKeys.VARIABLES]` (see `tf.Variable`).
 *  <b>`caching_device`</b>: Optional device string or function describing where the
     Variable should be cached for reading.  Defaults to the Variable's
     device.  If not `None`, caches on another device.  Typical use is to
@@ -1959,7 +1991,8 @@ Some useful partitioners are available.  See, e.g.,
 
 ##### Returns:
 
-  The created or existing variable.
+  The created or existing `Variable` (or `PartitionedVariable`, if a
+  partitioner was used).
 
 ##### Raises:
 
@@ -2247,7 +2280,7 @@ have the following properties:
    that are intended to be locals can be created by specifying
    `tf.Variable(..., trainable=false)`.
 * The function may use variable scopes and other templates internally to
-    create and reuse variables, but it shouldn't use `tf.get_variables` to
+    create and reuse variables, but it shouldn't use `tf.all_variables` to
     capture variables that are defined outside of the scope of the function.
 * Internal scopes and variable names should not depend on any arguments that
     are not supplied to `make_template`. In general you will get a ValueError
@@ -2426,7 +2459,7 @@ tensor shape, the initializer will raise a `ValueError`.
 
 
 *  <b>`ValueError`</b>: Too many elements provided. Needed at most 6, but received 8
-  ```
+```
 
 
 - - -
@@ -3062,12 +3095,32 @@ The `Graph` that contains the values, indices, and shape tensors.
 
 
 
+### Read-only Lookup Tables
+
+- - -
+
+### `tf.initialize_all_tables(name='init_all_tables')` {#initialize_all_tables}
+
+Returns an Op that initializes all tables of the default graph.
+
+##### Args:
+
+
+*  <b>`name`</b>: Optional name for the initialization op.
+
+##### Returns:
+
+  An Op that initializes all tables.  Note that if there are
+  not tables the returned Op is a NoOp.
+
+
+
 
 ## Exporting and Importing Meta Graphs
 
 - - -
 
-### `tf.train.export_meta_graph(filename=None, meta_info_def=None, graph_def=None, saver_def=None, collection_list=None, as_text=False)` {#export_meta_graph}
+### `tf.train.export_meta_graph(filename=None, meta_info_def=None, graph_def=None, saver_def=None, collection_list=None, as_text=False, graph=None, export_scope=None, **kwargs)` {#export_meta_graph}
 
 Returns `MetaGraphDef` proto. Optionally writes it to filename.
 
@@ -3086,15 +3139,26 @@ a subgraph.
 *  <b>`saver_def`</b>: `SaverDef` protocol buffer.
 *  <b>`collection_list`</b>: List of string keys to collect.
 *  <b>`as_text`</b>: If `True`, writes the `MetaGraphDef` as an ASCII proto.
+*  <b>`graph`</b>: The `Graph` to import into. If `None`, use the default graph.
+*  <b>`export_scope`</b>: Optional `string`. Name scope under which to extract
+    the subgraph. The scope name will be striped from the node definitions
+    for easy import later into new name scopes. If `None`, the whole graph
+    is exported. graph_def and export_scope cannot both be specified.
+*  <b>`**kwargs`</b>: Optional keyed arguments.
 
 ##### Returns:
 
   A `MetaGraphDef` proto.
 
+##### Raises:
+
+
+*  <b>`ValueError`</b>: When the `GraphDef` is larger than 2GB.
+
 
 - - -
 
-### `tf.train.import_meta_graph(meta_graph_or_file, clear_devices=False)` {#import_meta_graph}
+### `tf.train.import_meta_graph(meta_graph_or_file, clear_devices=False, import_scope=None, **kwargs)` {#import_meta_graph}
 
 Recreates a Graph saved in a `MetaGraphDef` proto.
 
@@ -3151,8 +3215,11 @@ device assignments have not changed.
 
 *  <b>`meta_graph_or_file`</b>: `MetaGraphDef` protocol buffer or filename (including
     the path) containing a `MetaGraphDef`.
-*  <b>`clear_devices`</b>: Boolean which controls whether to clear device information
-    from graph_def. Default false.
+*  <b>`clear_devices`</b>: Whether or not to clear the device field for an `Operation`
+    or `Tensor` during import.
+*  <b>`import_scope`</b>: Optional `string`. Name scope to add. Only used when
+    initializing from protocol buffer.
+*  <b>`**kwargs`</b>: Optional keyed arguments.
 
 ##### Returns:
 

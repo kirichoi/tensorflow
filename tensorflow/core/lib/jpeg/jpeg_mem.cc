@@ -26,6 +26,7 @@ limitations under the License.
 #include <utility>
 
 #include "tensorflow/core/lib/jpeg/jpeg_handle.h"
+#include "tensorflow/core/platform/dynamic_annotations.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/mem.h"
 #include "tensorflow/core/platform/types.h"
@@ -138,8 +139,11 @@ uint8* UncompressLow(const void* srcdata, FewerArgsForCompiler* argball) {
   cinfo.do_fancy_upsampling = boolean(flags.fancy_upscaling);
   cinfo.scale_num = 1;
   cinfo.scale_denom = ratio;
-  // Activating this has a quality/speed trade-off implication:
-  // cinfo.dct_method = JDCT_IFAST;
+  // Activating this has a quality/speed trade-off implication.
+  // However, most JPEGs are already compressed, and so the faster IDCT
+  // should have no effect on training. The fast setting speeds up training on the
+  // GPU, e.g. by about 30% for smaller networks such as AlexNet.
+  cinfo.dct_method = JDCT_IFAST;
 
   jpeg_start_decompress(&cinfo);
 

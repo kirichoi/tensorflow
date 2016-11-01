@@ -98,6 +98,10 @@ automatically by the optimizers in most cases.
 @@sparse_mask
 @@IndexedSlices
 
+### Read-only Lookup Tables
+
+@@initialize_all_tables
+
 
 ## Exporting and Importing Meta Graphs
 
@@ -112,6 +116,7 @@ from __future__ import print_function
 
 from tensorflow.python.framework import common_shapes
 from tensorflow.python.framework import ops
+from tensorflow.python.framework import tensor_shape
 from tensorflow.python.ops import gen_state_ops
 # go/tf-wildcard-import
 # pylint: disable=wildcard-import
@@ -142,6 +147,8 @@ def variable_op(shape, dtype, name="Variable", set_shape=True, container="",
   Returns:
     A variable tensor.
   """
+  if not set_shape:
+    shape = tensor_shape.unknown_shape()
   ret = gen_state_ops._variable(shape=shape, dtype=dtype, name=name,
                                 container=container, shared_name=shared_name)
   # TODO(mrry): Move this to where it is used, so we can get rid of this op

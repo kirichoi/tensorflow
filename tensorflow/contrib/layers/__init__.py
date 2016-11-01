@@ -42,7 +42,8 @@ available: `relu`, `relu6` and `linear`.
 ## Regularizers
 
 Regularization can help prevent overfitting. These have the signature
-`fn(weights)`. The loss is typically added to `tf.GraphKeys.REGULARIZATION_LOSS`
+`fn(weights)`. The loss is typically added to
+`tf.GraphKeys.REGULARIZATION_LOSSES`.
 
 @@apply_regularization
 @@l1_regularizer
@@ -88,6 +89,7 @@ import sys
 
 # pylint: disable=unused-import,wildcard-import
 from tensorflow.contrib.layers.python.layers import *
+from tensorflow.contrib.layers.python.ops import sparse_ops
 from tensorflow.python.util.all_util import make_all
 
 __all__ = make_all(__name__)
