@@ -57,7 +57,9 @@ allows the user to toggle between various dashboards.
           <div class="toolbar-title">TensorBoard</div>
           <paper-tabs selected="{{modeIndex}}" noink class="tabs" id="tabs">
             <template is="dom-repeat" items="[[tabs]]">
-              <paper-tab data-mode="[[item]]">[[item]]</paper-tab>
+              <template is="dom-if" if="[[_isTabEnabled(item)]]">
+                <paper-tab data-mode="[[item]]">[[item]]</paper-tab>
+              </template>
             </template>
           </paper-tabs>
           <div class="global-actions">
@@ -125,7 +127,7 @@ allows the user to toggle between various dashboards.
           ></tf-histogram-dashboard>
         </template>
 
-        <template is="dom-if" if="[[_modeIsProjections(mode)]]">
+        <template is="dom-if" if="[[_modeIsEmbeddings(mode)]]">
           <vz-projector-dashboard
             id="projector"
             route-prefix="/data/plugin/projector">
@@ -237,6 +239,14 @@ allows the user to toggle between various dashboards.
           type: Boolean,
           value: false,
         },
+        disabledTabs: String,
+      },
+      _isTabEnabled: function(tab) {
+        if (this.disabledTabs != null &&
+            this.disabledTabs.split(',').indexOf(tab) >= 0) {
+          return false;
+        }
+        return true;
       },
       _getModeFromIndex: function(modeIndex) {
         var mode = this.tabs[modeIndex];
@@ -262,8 +272,8 @@ allows the user to toggle between various dashboards.
       _modeIsGraphs: function(mode) {
         return mode === "graphs";
       },
-      _modeIsProjections: function(mode) {
-        return mode === "projections";
+      _modeIsEmbeddings: function(mode) {
+        return mode === "embeddings";
       },
       _modeIsDistributions: function(mode) {
         return mode === "distributions";
@@ -298,7 +308,7 @@ allows the user to toggle between various dashboards.
         }
       },
       reload: function() {
-        if (this.mode === "graphs" || this.mode === "projections") {
+        if (this.mode === "graphs" || this.mode === "embeddings") {
           return;
         }
         this.selectedDashboard().reload();
