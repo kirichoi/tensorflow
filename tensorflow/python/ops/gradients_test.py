@@ -18,6 +18,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import sys
 import warnings
 
 import numpy as np
@@ -44,6 +45,7 @@ from tensorflow.python.ops import nn_grad  # pylint: disable=unused-import
 from tensorflow.python.ops import state_grad  # pylint: disable=unused-import
 from tensorflow.python.ops import tensor_array_grad  # pylint: disable=unused-import
 from tensorflow.python.ops import tensor_array_ops
+from tensorflow.python.ops import variables
 from tensorflow.python.ops.nn_ops import bias_add
 from tensorflow.python.platform import googletest
 
@@ -112,9 +114,9 @@ class GradientsTest(test_util.TensorFlowTestCase):
       t2 = constant(2.0)
       t3 = array_ops.stack([t1, t2])
       t4 = constant([1.0])
-      t5 = array_ops.concat_v2([t4, t3], 0)
+      t5 = array_ops.concat([t4, t3], 0)
       t6 = constant([2.0])
-      t7 = array_ops.concat_v2([t5, t6], 0)
+      t7 = array_ops.concat([t5, t6], 0)
     self._assertOpListEqual([t7.op, t5.op, t4.op],
                             _OpsBetween(g, [t7.op], [t4.op]))
 
@@ -123,10 +125,10 @@ class GradientsTest(test_util.TensorFlowTestCase):
       t1 = constant(1.0)
       t2 = constant(2.0)
       t3 = array_ops.stack([t1, t2])
-      t4 = array_ops.concat_v2([t3, t3, t3], 0)
+      t4 = array_ops.concat([t3, t3, t3], 0)
       t5 = constant([1.0])
-      t6 = array_ops.concat_v2([t4, t5], 0)
-      t7 = array_ops.concat_v2([t6, t3], 0)
+      t6 = array_ops.concat([t4, t5], 0)
+      t7 = array_ops.concat([t6, t3], 0)
     self._assertOpListEqual([t6.op, t4.op, t3.op],
                             _OpsBetween(g, [t6.op], [t3.op]))
     self._assertOpListEqual([t7.op, t6.op, t5.op, t4.op, t3.op, t1.op],
@@ -311,6 +313,42 @@ class GradientsTest(test_util.TensorFlowTestCase):
       grad, = gradients.gradients(target, v)
       self.assertIsNone(grad)
 
+  def testVariableReadValueGradient(self):
+    with ops.Graph().as_default():
+      init = constant_op.constant(100.0)
+      var = variables.Variable(init)
+      gradient = gradients.gradients(var.read_value(), var)
+      self.assertIsNotNone(gradient)
+
+  def testVariableAsGraphElementGradient(self):
+    with ops.Graph().as_default() as graph:
+      init = constant_op.constant(100.0)
+      var = variables.Variable(init)
+      gradient = gradients.gradients(graph.as_graph_element(var), var)
+      self.assertIsNotNone(gradient)
+
+  def testVariableRefGradient(self):
+    with ops.Graph().as_default():
+      init = constant_op.constant(100.0)
+      var = variables.Variable(init)
+      gradient = gradients.gradients(var._ref(), var)
+      self.assertIsNotNone(gradient)
+
+  def testDependentYs(self):
+    with self.test_session():
+      x = constant_op.constant(3.0)
+      y = math_ops.square(x)
+      y1 = math_ops.square(y)
+      y2 = math_ops.square(y1)
+      g = gradients.gradients([y, y2], x)
+      self.assertAllClose(17502.0, g[0].eval())
+      g = gradients.gradients(y + y2, x)
+      self.assertAllClose(17502.0, g[0].eval())
+      z = array_ops.identity(y)
+      z2 = array_ops.identity(y2)
+      g = gradients.gradients([z, z2], x)
+      self.assertAllClose(17502.0, g[0].eval())
+
 
 class FunctionGradientsTest(test_util.TensorFlowTestCase):
 
@@ -409,6 +447,16 @@ class StopGradientTest(test_util.TensorFlowTestCase):
       out = array_ops.stop_gradient(inp)
       igrad = gradients.gradients(out, inp)[0]
     assert igrad is None
+
+
+class PreventGradientTest(test_util.TensorFlowTestCase):
+
+  def testPreventGradient(self):
+    with ops.Graph().as_default():
+      inp = constant(1.0, shape=[100, 32], name="in")
+      out = array_ops.prevent_gradient(inp)
+      with self.assertRaisesRegexp(LookupError, "explicitly disabled"):
+        _ = gradients.gradients(out, inp)
 
 
 class HessianVectorProductTest(test_util.TensorFlowTestCase):
@@ -527,6 +575,11 @@ class IndexedSlicesToTensorTest(test_util.TensorFlowTestCase):
       self.assertAllClose(np_val, c_dense.eval())
 
   def testWarnings(self):
+    # TODO(gunan) Reenable after this issue is fixed:
+    # https://github.com/google/protobuf/issues/2812
+    if sys.version_info >= (3, 6):
+      self.skipTest("Skipped test for Python 3.6+")
+
     # Smaller than the threshold: no warning.
     c_sparse = ops.IndexedSlices(
         array_ops.placeholder(dtypes.float32),
@@ -557,6 +610,18 @@ class IndexedSlicesToTensorTest(test_util.TensorFlowTestCase):
     self.assertTrue(
         "of unknown shape. This may consume a large amount of memory." in
         str(w[0].message))
+
+
+class OnlyRealGradientsTest(test_util.TensorFlowTestCase):
+
+  def testRealOnly(self):
+    x = constant_op.constant(7+3j, dtype=dtypes.complex64)
+    y = math_ops.square(x)
+    with self.assertRaisesRegexp(
+        TypeError,
+        r"Gradients of complex tensors must set grad_ys "
+        r"\(y\.dtype = tf\.complex64\)"):
+      gradients.gradients(y, x)
 
 
 if __name__ == "__main__":

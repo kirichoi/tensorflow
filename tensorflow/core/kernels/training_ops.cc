@@ -20,6 +20,12 @@ limitations under the License.
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/kernels/bounds_check.h"
+#include "tensorflow/core/kernels/training_op_helpers.h"
+#include "tensorflow/core/kernels/variable_ops.h"
+
+#ifdef TENSORFLOW_USE_SYCL
+#include "tensorflow/core/common_runtime/sycl/sycl_util.h"
+#endif // TENSORFLOW_USE_SYCL
 
 namespace tensorflow {
 
@@ -48,14 +54,25 @@ struct ApplyGradientDescent<CPUDevice, T> {
 
 #ifdef TENSORFLOW_USE_SYCL
 template <typename T>
-struct ApplyGradientDescent<SYCLDevice, T> {
+struct ApplyGradientDescentSYCL {
   void operator()(const SYCLDevice& d, typename TTypes<T>::Flat var,
-                  typename TTypes<T>::ConstScalar lr,
-                  typename TTypes<T>::ConstFlat grad) {
-    var.device(d) -= grad * lr();
+                  T lr, typename TTypes<T>::ConstFlat grad) {
+    var.device(d) -= grad * lr;
   }
 };
 #endif
+
+template <typename T>
+struct ApplyDelayCompensatedGradientDescent<CPUDevice, T> {
+  void operator()(const CPUDevice& d, typename TTypes<T>::Flat var,
+                  typename TTypes<T>::ConstScalar lr,
+                  typename TTypes<T>::ConstFlat grad,
+                  typename TTypes<T>::ConstScalar variance,
+                  typename TTypes<T>::Flat shadow) {
+    var.device(d) -= lr() * (grad + variance() * grad * (var - shadow));
+    shadow.device(d) = var;
+  }
+};
 
 template <typename T>
 struct ApplyAdadelta<CPUDevice, T> {
@@ -91,15 +108,14 @@ struct ApplyProximalGradientDescent<CPUDevice, T> {
     // compute v = w - lr * grad.
     prox_var.device(d) -= grad * lr();
     if (l1() > 0) {
-      var.device(d) = prox_var.abs() - var.constant(lr() * l1());
       // compute sign(v) * max(|v| - lr * l1, 0)
-      var.device(d) = prox_var.sign() * var.cwiseMax(T(0.0));
+      var.device(d) =
+          prox_var.sign() *
+          (prox_var.abs() - var.constant(lr() * l1())).cwiseMax(T(0.0)) /
+          (var.constant(1.0) + var.constant(l2() * lr()));
     } else {
-      var.device(d) = prox_var;
-    }
-    if (l2() > 0) {
-      // compute v / (1.0 + l2 * lr)
-      var.device(d) = var / (var.constant(1.0) + var.constant(l2() * lr()));
+      var.device(d) =
+          prox_var / (var.constant(1.0) + var.constant(l2() * lr()));
     }
   }
 };
@@ -168,15 +184,14 @@ struct ApplyProximalAdagrad<CPUDevice, T> {
     // compute v = w - lr * grad.
     prox_var.device(d) -= grad * learning_rate;
     if (l1() > 0) {
-      var.device(d) = prox_var.abs() - learning_rate * prox_var.constant(l1());
       // compute sign(v) * max(|v| - lr * l1, 0)
-      var.device(d) = prox_var.sign() * var.cwiseMax(T(0.0));
+      var.device(d) = prox_var.sign() *
+                      (prox_var.abs() - learning_rate * prox_var.constant(l1()))
+                          .cwiseMax(T(0.0)) /
+                      (var.constant(1.0) + var.constant(l2()) * learning_rate);
     } else {
-      var.device(d) = prox_var;
-    }
-    if (l2() > 0) {
       var.device(d) =
-          var / (var.constant(1.0) + var.constant(l2()) * learning_rate);
+          prox_var / (var.constant(1.0) + var.constant(l2()) * learning_rate);
     }
   }
 };
@@ -204,14 +219,17 @@ struct ApplyFtrl<CPUDevice, T> {
     if (lr_power() == static_cast<T>(-0.5)) {
       auto y = new_accum.sqrt() / new_accum.constant(lr()) +
                linear.constant(static_cast<T>(2) * l2());
-      var.device(d) = x / y;
+      auto pre_shrink = x / y;
+      var.device(d) = (linear.abs() > linear.constant(l1()))
+                          .select(pre_shrink, var.constant(static_cast<T>(0)));
+
     } else {
       auto y = new_accum.pow(-lr_power()) / new_accum.constant(lr()) +
                linear.constant(static_cast<T>(2) * l2());
-      var.device(d) = x / y;
+      auto pre_shrink = x / y;
+      var.device(d) = (linear.abs() > linear.constant(l1()))
+                          .select(pre_shrink, var.constant(static_cast<T>(0)));
     }
-    var.device(d) = (linear.abs() > linear.constant(l1()))
-                        .select(var, var.constant(static_cast<T>(0)));
     accum.device(d) += grad.square();
   }
 };
@@ -242,19 +260,43 @@ struct ApplyAdamNonCuda {
                   typename TTypes<T>::ConstScalar beta1,
                   typename TTypes<T>::ConstScalar beta2,
                   typename TTypes<T>::ConstScalar epsilon,
-                  typename TTypes<T>::ConstFlat grad) {
+                  typename TTypes<T>::ConstFlat grad, bool use_nesterov) {
     const T alpha = lr() * Eigen::numext::sqrt(T(1) - beta2_power()) /
                     (T(1) - beta1_power());
+    // beta1 == μ
+    // beta2 == ν
+    // v     == n
+    // var   == θ
+
     m.device(d) += (grad - m) * (T(1) - beta1());
     v.device(d) += (grad.square() - v) * (T(1) - beta2());
-    var.device(d) -= (m * alpha) / (v.sqrt() + epsilon());
+    if (use_nesterov) {
+      var.device(d) -= ((grad * (T(1) - beta1()) + beta1() * m) * alpha) /
+                       (v.sqrt() + epsilon());
+    } else {
+      var.device(d) -= (m * alpha) / (v.sqrt() + epsilon());
+    }
   }
 };
 
+#ifdef TENSORFLOW_USE_SYCL
+template <typename T>
+struct ApplyAdamSYCL {
+  void operator()(const SYCLDevice& d, typename TTypes<T>::Flat var,
+                  typename TTypes<T>::Flat m, typename TTypes<T>::Flat v,
+                  T beta1_power, T beta2_power, T lr, T beta1, T beta2, T epsilon,
+                  typename TTypes<T>::ConstFlat grad) {
+    const T alpha = lr * Eigen::numext::sqrt(T(1) - beta2_power) /
+                    (T(1) - beta1_power);
+    m.device(d) += (grad - m) * (T(1) - beta1);
+    v.device(d) += (grad.square() - v) * (T(1) - beta2);
+    var.device(d) -= (m * alpha) / (v.sqrt() + epsilon);
+  }
+};
+#endif // TENSORFLOW_USE_SYCL
+
 template <typename T>
 struct ApplyAdam<CPUDevice, T> : ApplyAdamNonCuda<CPUDevice, T> {};
-template <typename T>
-struct ApplyAdam<SYCLDevice, T> : ApplyAdamNonCuda<SYCLDevice, T> {};
 
 template <typename T>
 struct ApplyRMSProp<CPUDevice, T> {
@@ -292,34 +334,6 @@ struct ApplyCenteredRMSProp<CPUDevice, T> {
 
 }  // namespace functor
 
-// MaybeLockMutexesInOrder is a helper function to acquire mutexes in address
-// order to mitigate deadlock.  Returns a vector of acquired mutexes.
-// Safe to pass duplicates - will only lock each distinct mutex once.
-// If do_lock is false, returns immediately.
-std::vector<mutex_lock> MaybeLockMutexesInOrder(
-    OpKernelContext* ctx, bool do_lock, const std::vector<int>& input_ids) {
-  std::vector<mutex_lock> locks;
-  if (!do_lock) {
-    return locks;
-  }
-  std::vector<mutex*> mutexes;
-  std::vector<int> acquire_order;
-  for (auto input : input_ids) {
-    auto* mutex = ctx->input_ref_mutex(input);
-    // Only lock each mutex once if duplicates exist (n^2 but n is 2 or 3).
-    if (std::find(mutexes.begin(), mutexes.end(), mutex) == mutexes.end()) {
-      acquire_order.push_back(input);
-      mutexes.push_back(mutex);
-    }
-  }
-  std::sort(acquire_order.begin(), acquire_order.end(),
-            [&mutexes](int a, int b) { return mutexes[a] < mutexes[b]; });
-
-  for (auto input : acquire_order) {
-    locks.emplace_back(*ctx->input_ref_mutex(input));
-  }
-  return locks;
-}
 
 template <typename Device, typename T>
 class ApplyGradientDescentOp : public OpKernel {
@@ -329,8 +343,11 @@ class ApplyGradientDescentOp : public OpKernel {
   }
 
   void Compute(OpKernelContext* ctx) override {
-    auto locks = MaybeLockMutexesInOrder(ctx, use_exclusive_lock_, {0});
-    Tensor var = ctx->mutable_input(0, use_exclusive_lock_);
+    auto locks =
+        MaybeLockVariableInputMutexesInOrder(ctx, use_exclusive_lock_, {0});
+    Tensor var;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 0, use_exclusive_lock_, &var));
 
     OP_REQUIRES(
         ctx, var.IsInitialized(),
@@ -351,28 +368,72 @@ class ApplyGradientDescentOp : public OpKernel {
     functor::ApplyGradientDescent<Device, T>()(
         device, var.flat<T>(), alpha.scalar<T>(), delta.flat<T>());
 
-    ctx->forward_ref_input_to_ref_output(0, 0);
+    MaybeForwardRefInputToRefOutput(ctx, 0, 0);
   }
 
  private:
   bool use_exclusive_lock_;
 };
 
+#ifdef TENSORFLOW_USE_SYCL
+template <typename T>
+class ApplyGradientDescentOp < SYCLDevice, T > : public OpKernel {
+ public:
+  explicit ApplyGradientDescentOp(OpKernelConstruction* ctx) : OpKernel(ctx) {
+    OP_REQUIRES_OK(ctx, ctx->GetAttr("use_locking", &use_exclusive_lock_));
+  }
+
+  void Compute(OpKernelContext* ctx) override {
+    auto locks = MaybeLockVariableInputMutexesInOrder(ctx, use_exclusive_lock_, {0});
+    Tensor var;
+    OP_REQUIRES_OK(ctx, GetInputTensorFromVariable(ctx, 0, use_exclusive_lock_, &var));
+
+    OP_REQUIRES(
+        ctx, var.IsInitialized(),
+        errors::FailedPrecondition(
+            "Attempting to use uninitialized variables: ", def().input(0)));
+    const Tensor& alpha_dev = ctx->input(1);
+    OP_REQUIRES(ctx, IsLegacyScalar(alpha_dev.shape()),
+                errors::InvalidArgument("alpha is not a scalar: ",
+                                        alpha_dev.shape().DebugString()));
+    const Tensor& delta = ctx->input(2);
+    OP_REQUIRES(
+        ctx, var.shape().IsSameSize(delta.shape()),
+        errors::InvalidArgument("var and delta do not have the same shape",
+                                var.shape().DebugString(), " ",
+                                delta.shape().DebugString()));
+
+    auto device = ctx->eigen_sycl_device();
+    auto size = sizeof(T);
+    T alpha = T(0);
+    auto src_ptr = GetBase(&alpha_dev);
+    device.memcpyDeviceToHost(&alpha, static_cast<const T *>(src_ptr), size);
+
+    functor::ApplyGradientDescentSYCL<T>()(device, var.flat<T>(),
+        alpha, delta.flat<T>());
+
+    MaybeForwardRefInputToRefOutput(ctx, 0, 0);
+  }
+
+ private:
+  bool use_exclusive_lock_;
+};
+#endif // TENSORFLOW_USE_SYCL
+
 #define REGISTER_KERNELS(D, T)                                                \
   REGISTER_KERNEL_BUILDER(                                                    \
       Name("ApplyGradientDescent").Device(DEVICE_##D).TypeConstraint<T>("T"), \
-      ApplyGradientDescentOp<D##Device, T>);
+      ApplyGradientDescentOp<D##Device, T>);                                  \
+  REGISTER_KERNEL_BUILDER(Name("ResourceApplyGradientDescent")                \
+                              .Device(DEVICE_##D)                             \
+                              .HostMemory("var")                              \
+                              .TypeConstraint<T>("T"),                        \
+                          ApplyGradientDescentOp<D##Device, T>);
 #define REGISTER_CPU_KERNELS(T) REGISTER_KERNELS(CPU, T);
 
 TF_CALL_half(REGISTER_CPU_KERNELS);
 TF_CALL_float(REGISTER_CPU_KERNELS);
 TF_CALL_double(REGISTER_CPU_KERNELS);
-
-#ifdef TENSORFLOW_USE_SYCL
-#define REGISTER_SYCL_KERNELS(T) REGISTER_KERNELS(SYCL, T);
-TF_CALL_float(REGISTER_SYCL_KERNELS);
-#undef REGISTER_SYCL_KERNELS
-#endif
 
 #if GOOGLE_CUDA
 // Forward declarations of the functor specializations for GPU.
@@ -394,6 +455,81 @@ REGISTER_KERNELS(GPU, Eigen::half);
 REGISTER_KERNELS(GPU, float);
 REGISTER_KERNELS(GPU, double);
 #endif
+
+#ifdef TENSORFLOW_USE_SYCL
+#define REGISTER_SYCL_KERNELS(T) REGISTER_KERNELS(SYCL, T);
+TF_CALL_float(REGISTER_SYCL_KERNELS);
+TF_CALL_double(REGISTER_SYCL_KERNELS);
+#undef REGISTER_SYCL_KERNELS
+#endif // TENSORFLOW_USE_SYCL
+
+#undef REGISTER_CPU_KERNELS
+#undef REGISTER_KERNELS
+
+template <typename Device, typename T>
+class ApplyDelayCompensatedGradientDescentOp : public OpKernel {
+ public:
+  explicit ApplyDelayCompensatedGradientDescentOp(OpKernelConstruction* ctx) : OpKernel(ctx) {
+    OP_REQUIRES_OK(ctx, ctx->GetAttr("use_locking", &use_exclusive_lock_));
+  }
+
+  void Compute(OpKernelContext* ctx) override {
+    auto locks = MaybeLockVariableInputMutexesInOrder(ctx, use_exclusive_lock_, {0, 4});
+    Tensor var;
+    OP_REQUIRES_OK(ctx, GetInputTensorFromVariable(ctx, 0, use_exclusive_lock_, &var));
+    OP_REQUIRES(
+        ctx, var.IsInitialized(),
+        errors::FailedPrecondition(
+            "Attempting to use uninitialized variables: ", def().input(0)));
+    const Tensor& alpha = ctx->input(1);
+    OP_REQUIRES(ctx, IsLegacyScalar(alpha.shape()),
+                errors::InvalidArgument("alpha is not a scalar: ",
+                                        alpha.shape().DebugString()));
+    const Tensor& delta = ctx->input(2);
+    OP_REQUIRES(
+        ctx, var.shape().IsSameSize(delta.shape()),
+        errors::InvalidArgument("var and delta do not have the same shape",
+                                var.shape().DebugString(), " ",
+                                delta.shape().DebugString()));
+    const Tensor& lambda = ctx->input(3);
+    OP_REQUIRES(ctx, IsLegacyScalar(lambda.shape()),
+                errors::InvalidArgument("lambda is not a scalar: ",
+                                        lambda.shape().DebugString()));
+    Tensor shadow;
+    OP_REQUIRES_OK(ctx, GetInputTensorFromVariable(ctx, 4, use_exclusive_lock_, &shadow));
+    OP_REQUIRES(
+        ctx, shadow.shape().IsSameSize(var.shape()),
+        errors::InvalidArgument("shadow and var do not have the same shape",
+                                shadow.shape().DebugString(), " ",
+                                var.shape().DebugString()));
+
+    const Device& device = ctx->template eigen_device<Device>();
+    functor::ApplyDelayCompensatedGradientDescent<Device, T>()(
+        device, var.flat<T>(), alpha.scalar<T>(), delta.flat<T>(),
+        lambda.scalar<T>(), shadow.flat<T>()
+    );
+
+    MaybeForwardRefInputToRefOutput(ctx, 0, 0);
+  }
+
+ private:
+  bool use_exclusive_lock_;
+};
+
+#define REGISTER_KERNELS(D, T)                                 \
+  REGISTER_KERNEL_BUILDER(                                     \
+      Name("ApplyDelayCompensatedGradientDescent")             \
+          .Device(DEVICE_##D)                                  \
+          .HostMemory("var")                                   \
+          .HostMemory("shadow")                                \
+          .TypeConstraint<T>("T"),                             \
+      ApplyDelayCompensatedGradientDescentOp<D##Device, T>);
+#define REGISTER_CPU_KERNELS(T) REGISTER_KERNELS(CPU, T);
+
+TF_CALL_half(REGISTER_CPU_KERNELS);
+TF_CALL_float(REGISTER_CPU_KERNELS);
+TF_CALL_double(REGISTER_CPU_KERNELS);
+
 #undef REGISTER_CPU_KERNELS
 #undef REGISTER_KERNELS
 
@@ -406,7 +542,7 @@ class ApplyAdadeltaOp : public OpKernel {
 
   void Compute(OpKernelContext* ctx) override {
     if (use_exclusive_lock_) {
-      mutex_lock l1(*ctx->input_ref_mutex(0));
+      mutex_lock l1(*GetTrainingVariableMutex(ctx, 0));
       // Don't try to acquire a lock on the second ref as they share the same
       // mutex.
       //
@@ -419,16 +555,22 @@ class ApplyAdadeltaOp : public OpKernel {
       if (!ctx->status().ok()) return;
       DoCompute(ctx);
     }
-    ctx->forward_ref_input_to_ref_output(0, 0);
+    MaybeForwardRefInputToRefOutput(ctx, 0, 0);
   }
 
  private:
   bool use_exclusive_lock_;
 
   void DoValidate(OpKernelContext* ctx) {
-    Tensor var = ctx->mutable_input(0, use_exclusive_lock_);
-    Tensor accum = ctx->mutable_input(1, use_exclusive_lock_);
-    Tensor accum_update = ctx->mutable_input(2, use_exclusive_lock_);
+    Tensor var;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 0, use_exclusive_lock_, &var));
+    Tensor accum;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 1, use_exclusive_lock_, &accum));
+    Tensor accum_update;
+    OP_REQUIRES_OK(ctx, GetInputTensorFromVariable(ctx, 2, use_exclusive_lock_,
+                                                   &accum_update));
 
     OP_REQUIRES(
         ctx, var.IsInitialized(),
@@ -474,9 +616,15 @@ class ApplyAdadeltaOp : public OpKernel {
 
   void DoCompute(OpKernelContext* ctx) {
     const Device& device = ctx->template eigen_device<Device>();
-    Tensor var = ctx->mutable_input(0, use_exclusive_lock_);
-    Tensor accum = ctx->mutable_input(1, use_exclusive_lock_);
-    Tensor accum_update = ctx->mutable_input(2, use_exclusive_lock_);
+    Tensor var;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 0, use_exclusive_lock_, &var));
+    Tensor accum;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 1, use_exclusive_lock_, &accum));
+    Tensor accum_update;
+    OP_REQUIRES_OK(ctx, GetInputTensorFromVariable(ctx, 2, use_exclusive_lock_,
+                                                   &accum_update));
 
     const Tensor& lr = ctx->input(3);
     const Tensor& rho = ctx->input(4);
@@ -495,7 +643,14 @@ using GPUDevice = Eigen::GpuDevice;
 #define REGISTER_KERNELS(D, T)                                         \
   REGISTER_KERNEL_BUILDER(                                             \
       Name("ApplyAdadelta").Device(DEVICE_##D).TypeConstraint<T>("T"), \
-      ApplyAdadeltaOp<D##Device, T>);
+      ApplyAdadeltaOp<D##Device, T>);                                  \
+  REGISTER_KERNEL_BUILDER(Name("ResourceApplyAdadelta")                \
+                              .Device(DEVICE_##D)                      \
+                              .HostMemory("var")                       \
+                              .HostMemory("accum")                     \
+                              .HostMemory("accum_update")              \
+                              .TypeConstraint<T>("T"),                 \
+                          ApplyAdadeltaOp<D##Device, T>);
 #define REGISTER_CPU_KERNELS(T) REGISTER_KERNELS(CPU, T);
 
 TF_CALL_half(REGISTER_CPU_KERNELS);
@@ -536,7 +691,7 @@ class SparseApplyAdadeltaOp : public OpKernel {
   }
 
   void Compute(OpKernelContext* ctx) override NO_THREAD_SAFETY_ANALYSIS {
-    mutex* mu_var = ctx->input_ref_mutex(0);
+    mutex* mu_var = GetTrainingVariableMutex(ctx, 0);
     // mu_accum is actually the same mutex as mu_var since currently we use a
     // global mutex.
     //
@@ -544,9 +699,15 @@ class SparseApplyAdadeltaOp : public OpKernel {
     if (use_exclusive_lock_) {
       mu_var->lock();
     }
-    Tensor var = ctx->mutable_input(0, use_exclusive_lock_);
-    Tensor accum_grad = ctx->mutable_input(1, use_exclusive_lock_);
-    Tensor accum_update = ctx->mutable_input(2, use_exclusive_lock_);
+    Tensor var;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 0, use_exclusive_lock_, &var));
+    Tensor accum_grad;
+    OP_REQUIRES_OK(ctx, GetInputTensorFromVariable(ctx, 1, use_exclusive_lock_,
+                                                   &accum_grad));
+    Tensor accum_update;
+    OP_REQUIRES_OK(ctx, GetInputTensorFromVariable(ctx, 2, use_exclusive_lock_,
+                                                   &accum_update));
     OP_REQUIRES(
         ctx, var.IsInitialized(),
         errors::FailedPrecondition(
@@ -642,7 +803,7 @@ class SparseApplyAdadeltaOp : public OpKernel {
       mu_var->unlock();
     }
 
-    ctx->forward_ref_input_to_ref_output(0, 0);
+    MaybeForwardRefInputToRefOutput(ctx, 0, 0);
   }
 
  private:
@@ -651,6 +812,11 @@ class SparseApplyAdadeltaOp : public OpKernel {
 
 #define REGISTER_KERNELS(T, Tindices)                                \
   REGISTER_KERNEL_BUILDER(Name("SparseApplyAdadelta")                \
+                              .Device(DEVICE_CPU)                    \
+                              .TypeConstraint<T>("T")                \
+                              .TypeConstraint<Tindices>("Tindices"), \
+                          SparseApplyAdadeltaOp<T, Tindices>);       \
+  REGISTER_KERNEL_BUILDER(Name("ResourceSparseApplyAdadelta")        \
                               .Device(DEVICE_CPU)                    \
                               .TypeConstraint<T>("T")                \
                               .TypeConstraint<Tindices>("Tindices"), \
@@ -676,8 +842,11 @@ class ApplyProximalGradientDescentOp : public OpKernel {
   }
 
   void Compute(OpKernelContext* ctx) override {
-    auto locks = MaybeLockMutexesInOrder(ctx, use_exclusive_lock_, {0});
-    Tensor var = ctx->mutable_input(0, use_exclusive_lock_);
+    auto locks =
+        MaybeLockVariableInputMutexesInOrder(ctx, use_exclusive_lock_, {0});
+    Tensor var;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 0, use_exclusive_lock_, &var));
 
     OP_REQUIRES(
         ctx, var.IsInitialized(),
@@ -710,17 +879,22 @@ class ApplyProximalGradientDescentOp : public OpKernel {
         device, var.flat<T>(), alpha.scalar<T>(), l1.scalar<T>(),
         l2.scalar<T>(), delta.flat<T>());
 
-    ctx->forward_ref_input_to_ref_output(0, 0);
+    MaybeForwardRefInputToRefOutput(ctx, 0, 0);
   }
 
  private:
   bool use_exclusive_lock_;
 };
 
-#define REGISTER_KERNELS(D, T)                                 \
-  REGISTER_KERNEL_BUILDER(Name("ApplyProximalGradientDescent") \
-                              .Device(DEVICE_##D)              \
-                              .TypeConstraint<T>("T"),         \
+#define REGISTER_KERNELS(D, T)                                           \
+  REGISTER_KERNEL_BUILDER(Name("ApplyProximalGradientDescent")           \
+                              .Device(DEVICE_##D)                        \
+                              .TypeConstraint<T>("T"),                   \
+                          ApplyProximalGradientDescentOp<D##Device, T>); \
+  REGISTER_KERNEL_BUILDER(Name("ResourceApplyProximalGradientDescent")   \
+                              .HostMemory("var")                         \
+                              .Device(DEVICE_##D)                        \
+                              .TypeConstraint<T>("T"),                   \
                           ApplyProximalGradientDescentOp<D##Device, T>);
 
 REGISTER_KERNELS(CPU, float);
@@ -737,8 +911,11 @@ class SparseApplyProximalGradientDescentOp : public OpKernel {
   }
 
   void Compute(OpKernelContext* ctx) override NO_THREAD_SAFETY_ANALYSIS {
-    auto locks = MaybeLockMutexesInOrder(ctx, use_exclusive_lock_, {0, 1});
-    Tensor var = ctx->mutable_input(0, use_exclusive_lock_);
+    auto locks =
+        MaybeLockVariableInputMutexesInOrder(ctx, use_exclusive_lock_, {0, 1});
+    Tensor var;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 0, use_exclusive_lock_, &var));
     OP_REQUIRES(ctx, TensorShapeUtils::IsVectorOrHigher(var.shape()),
                 errors::InvalidArgument("var must be at least 1 dimensional"));
 
@@ -803,14 +980,14 @@ class SparseApplyProximalGradientDescentOp : public OpKernel {
           // v = w - g * learning_rate.
           prox_v -= g * learning_rate;
           if (l1_scalar > 0) {
-            v = prox_v.abs() - learning_rate * prox_v.constant(l1_scalar);
             // compute sign(v) * max(|v|, 0)
-            v = prox_v.sign() * v.cwiseMax(static_cast<T>(0.0));
+            v = prox_v.sign() *
+                (prox_v.abs() - learning_rate * prox_v.constant(l1_scalar))
+                    .cwiseMax(static_cast<T>(0.0)) /
+                (v.constant(1.0) + v.constant(l2_scalar) * learning_rate);
           } else {
-            v = prox_v;
-          }
-          if (l2_scalar > 0) {
-            v /= (v.constant(1.0) + v.constant(l2_scalar) * learning_rate);
+            v = prox_v /
+                (v.constant(1.0) + v.constant(l2_scalar) * learning_rate);
           }
         }
       } else {
@@ -833,31 +1010,35 @@ class SparseApplyProximalGradientDescentOp : public OpKernel {
           auto prox_v = var_flat(index);
           prox_v -= learning_rate * g;
           if (l1_scalar > 0) {
-            var_flat(index) = std::abs(prox_v) - learning_rate * l1_scalar;
             var_flat(index) =
-                sgn(prox_v) * std::max(var_flat(index), static_cast<T>(0.0));
+                sgn(prox_v) *
+                std::max(std::abs(prox_v) - learning_rate * l1_scalar,
+                         static_cast<T>(0.0)) /
+                (1.0 + l2_scalar * learning_rate);
           } else {
-            var_flat(index) = prox_v;
-          }
-          if (l2_scalar > 0) {
-            var_flat(index) /= (1.0 + l2_scalar * learning_rate);
+            var_flat(index) = prox_v / (1.0 + l2_scalar * learning_rate);
           }
         }
       }
     }
 
-    ctx->forward_ref_input_to_ref_output(0, 0);
+    MaybeForwardRefInputToRefOutput(ctx, 0, 0);
   }
 
  private:
   bool use_exclusive_lock_;
 };
 
-#define REGISTER_KERNELS(T, Tindices)                                \
-  REGISTER_KERNEL_BUILDER(Name("SparseApplyProximalGradientDescent") \
-                              .Device(DEVICE_CPU)                    \
-                              .TypeConstraint<T>("T")                \
-                              .TypeConstraint<Tindices>("Tindices"), \
+#define REGISTER_KERNELS(T, Tindices)                                         \
+  REGISTER_KERNEL_BUILDER(Name("SparseApplyProximalGradientDescent")          \
+                              .Device(DEVICE_CPU)                             \
+                              .TypeConstraint<T>("T")                         \
+                              .TypeConstraint<Tindices>("Tindices"),          \
+                          SparseApplyProximalGradientDescentOp<T, Tindices>); \
+  REGISTER_KERNEL_BUILDER(Name("ResourceSparseApplyProximalGradientDescent")  \
+                              .Device(DEVICE_CPU)                             \
+                              .TypeConstraint<T>("T")                         \
+                              .TypeConstraint<Tindices>("Tindices"),          \
                           SparseApplyProximalGradientDescentOp<T, Tindices>);
 
 REGISTER_KERNELS(float, int32);
@@ -874,9 +1055,14 @@ class ApplyAdagradOp : public OpKernel {
   }
 
   void Compute(OpKernelContext* ctx) override {
-    auto locks = MaybeLockMutexesInOrder(ctx, use_exclusive_lock_, {0, 1});
-    Tensor var = ctx->mutable_input(0, use_exclusive_lock_);
-    Tensor accum = ctx->mutable_input(1, use_exclusive_lock_);
+    auto locks =
+        MaybeLockVariableInputMutexesInOrder(ctx, use_exclusive_lock_, {0, 1});
+    Tensor var;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 0, use_exclusive_lock_, &var));
+    Tensor accum;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 1, use_exclusive_lock_, &accum));
     OP_REQUIRES(
         ctx, var.IsInitialized(),
         errors::FailedPrecondition(
@@ -905,7 +1091,7 @@ class ApplyAdagradOp : public OpKernel {
     functor::ApplyAdagrad<Device, T>()(device, var.flat<T>(), accum.flat<T>(),
                                        lr.scalar<T>(), grad.flat<T>());
 
-    ctx->forward_ref_input_to_ref_output(0, 0);
+    MaybeForwardRefInputToRefOutput(ctx, 0, 0);
   }
 
  private:
@@ -918,7 +1104,13 @@ using GPUDevice = Eigen::GpuDevice;
 #define REGISTER_KERNELS(D, T)                                        \
   REGISTER_KERNEL_BUILDER(                                            \
       Name("ApplyAdagrad").Device(DEVICE_##D).TypeConstraint<T>("T"), \
-      ApplyAdagradOp<D##Device, T>);
+      ApplyAdagradOp<D##Device, T>);                                  \
+  REGISTER_KERNEL_BUILDER(Name("ResourceApplyAdagrad")                \
+                              .HostMemory("var")                      \
+                              .HostMemory("accum")                    \
+                              .Device(DEVICE_##D)                     \
+                              .TypeConstraint<T>("T"),                \
+                          ApplyAdagradOp<D##Device, T>);
 #define REGISTER_CPU_KERNELS(T) REGISTER_KERNELS(CPU, T);
 
 TF_CALL_half(REGISTER_CPU_KERNELS);
@@ -956,9 +1148,14 @@ class ApplyProximalAdagradOp : public OpKernel {
   }
 
   void Compute(OpKernelContext* ctx) override {
-    auto locks = MaybeLockMutexesInOrder(ctx, use_exclusive_lock_, {0, 1});
-    Tensor var = ctx->mutable_input(0, use_exclusive_lock_);
-    Tensor accum = ctx->mutable_input(1, use_exclusive_lock_);
+    auto locks =
+        MaybeLockVariableInputMutexesInOrder(ctx, use_exclusive_lock_, {0, 1});
+    Tensor var;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 0, use_exclusive_lock_, &var));
+    Tensor accum;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 1, use_exclusive_lock_, &accum));
     OP_REQUIRES(
         ctx, var.IsInitialized(),
         errors::FailedPrecondition(
@@ -1004,7 +1201,7 @@ class ApplyProximalAdagradOp : public OpKernel {
         device, var.flat<T>(), accum.flat<T>(), lr.scalar<T>(), l1.scalar<T>(),
         l2.scalar<T>(), grad.flat<T>());
 
-    ctx->forward_ref_input_to_ref_output(0, 0);
+    MaybeForwardRefInputToRefOutput(ctx, 0, 0);
   }
 
  private:
@@ -1017,7 +1214,13 @@ using GPUDevice = Eigen::GpuDevice;
 #define REGISTER_KERNELS(D, T)                                                \
   REGISTER_KERNEL_BUILDER(                                                    \
       Name("ApplyProximalAdagrad").Device(DEVICE_##D).TypeConstraint<T>("T"), \
-      ApplyProximalAdagradOp<D##Device, T>);
+      ApplyProximalAdagradOp<D##Device, T>);                                  \
+  REGISTER_KERNEL_BUILDER(Name("ResourceApplyProximalAdagrad")                \
+                              .Device(DEVICE_##D)                             \
+                              .HostMemory("var")                              \
+                              .HostMemory("accum")                            \
+                              .TypeConstraint<T>("T"),                        \
+                          ApplyProximalAdagradOp<D##Device, T>);
 
 REGISTER_KERNELS(CPU, float);
 REGISTER_KERNELS(CPU, double);
@@ -1052,9 +1255,14 @@ class SparseApplyAdagradOp : public OpKernel {
   }
 
   void Compute(OpKernelContext* ctx) override NO_THREAD_SAFETY_ANALYSIS {
-    auto locks = MaybeLockMutexesInOrder(ctx, use_exclusive_lock_, {0, 1});
-    Tensor var = ctx->mutable_input(0, use_exclusive_lock_);
-    Tensor accum = ctx->mutable_input(1, use_exclusive_lock_);
+    auto locks =
+        MaybeLockVariableInputMutexesInOrder(ctx, use_exclusive_lock_, {0, 1});
+    Tensor var;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 0, use_exclusive_lock_, &var));
+    Tensor accum;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 1, use_exclusive_lock_, &accum));
     OP_REQUIRES(
         ctx, var.IsInitialized(),
         errors::FailedPrecondition(
@@ -1142,7 +1350,7 @@ class SparseApplyAdagradOp : public OpKernel {
       }
     }
 
-    ctx->forward_ref_input_to_ref_output(0, 0);
+    MaybeForwardRefInputToRefOutput(ctx, 0, 0);
   }
 
  private:
@@ -1151,6 +1359,11 @@ class SparseApplyAdagradOp : public OpKernel {
 
 #define REGISTER_KERNELS(T, Tindices)                                \
   REGISTER_KERNEL_BUILDER(Name("SparseApplyAdagrad")                 \
+                              .Device(DEVICE_CPU)                    \
+                              .TypeConstraint<T>("T")                \
+                              .TypeConstraint<Tindices>("Tindices"), \
+                          SparseApplyAdagradOp<T, Tindices>);        \
+  REGISTER_KERNEL_BUILDER(Name("ResourceSparseApplyAdagrad")         \
                               .Device(DEVICE_CPU)                    \
                               .TypeConstraint<T>("T")                \
                               .TypeConstraint<Tindices>("Tindices"), \
@@ -1176,9 +1389,14 @@ class SparseApplyProximalAdagradOp : public OpKernel {
   }
 
   void Compute(OpKernelContext* ctx) override NO_THREAD_SAFETY_ANALYSIS {
-    auto locks = MaybeLockMutexesInOrder(ctx, use_exclusive_lock_, {0, 1});
-    Tensor var = ctx->mutable_input(0, use_exclusive_lock_);
-    Tensor accum = ctx->mutable_input(1, use_exclusive_lock_);
+    auto locks =
+        MaybeLockVariableInputMutexesInOrder(ctx, use_exclusive_lock_, {0, 1});
+    Tensor var;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 0, use_exclusive_lock_, &var));
+    Tensor accum;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 1, use_exclusive_lock_, &accum));
     OP_REQUIRES(
         ctx, var.IsInitialized(),
         errors::FailedPrecondition(
@@ -1265,14 +1483,14 @@ class SparseApplyProximalAdagradOp : public OpKernel {
           // v = w - g * learning_rate.
           prox_v -= g * learning_rate;
           if (l1_scalar > 0) {
-            v = prox_v.abs() - learning_rate * prox_v.constant(l1_scalar);
             // compute sign(v) * max(|v|, 0)
-            v = prox_v.sign() * v.cwiseMax(static_cast<T>(0.0));
+            v = prox_v.sign() *
+                (prox_v.abs() - learning_rate * prox_v.constant(l1_scalar))
+                    .cwiseMax(static_cast<T>(0.0)) /
+                (v.constant(1.0) + v.constant(l2_scalar) * learning_rate);
           } else {
-            v = prox_v;
-          }
-          if (l2_scalar > 0) {
-            v /= (v.constant(1.0) + v.constant(l2_scalar) * learning_rate);
+            v = prox_v /
+                (v.constant(1.0) + v.constant(l2_scalar) * learning_rate);
           }
         }
       } else {
@@ -1298,31 +1516,35 @@ class SparseApplyProximalAdagradOp : public OpKernel {
           auto prox_v = var_flat(index);
           prox_v -= learning_rate * g;
           if (l1_scalar > 0) {
-            var_flat(index) = std::abs(prox_v) - learning_rate * l1_scalar;
             var_flat(index) =
-                sgn(prox_v) * std::max(var_flat(index), static_cast<T>(0.0));
+                sgn(prox_v) *
+                std::max(std::abs(prox_v) - learning_rate * l1_scalar,
+                         static_cast<T>(0.0)) /
+                (1.0 + l2_scalar * learning_rate);
           } else {
-            var_flat(index) = prox_v;
-          }
-          if (l2_scalar > 0) {
-            var_flat(index) /= (1.0 + l2_scalar * learning_rate);
+            var_flat(index) = prox_v / (1.0 + l2_scalar * learning_rate);
           }
         }
       }
     }
 
-    ctx->forward_ref_input_to_ref_output(0, 0);
+    MaybeForwardRefInputToRefOutput(ctx, 0, 0);
   }
 
  private:
   bool use_exclusive_lock_;
 };
 
-#define REGISTER_KERNELS(T, Tindices)                                \
-  REGISTER_KERNEL_BUILDER(Name("SparseApplyProximalAdagrad")         \
-                              .Device(DEVICE_CPU)                    \
-                              .TypeConstraint<T>("T")                \
-                              .TypeConstraint<Tindices>("Tindices"), \
+#define REGISTER_KERNELS(T, Tindices)                                 \
+  REGISTER_KERNEL_BUILDER(Name("SparseApplyProximalAdagrad")          \
+                              .Device(DEVICE_CPU)                     \
+                              .TypeConstraint<T>("T")                 \
+                              .TypeConstraint<Tindices>("Tindices"),  \
+                          SparseApplyProximalAdagradOp<T, Tindices>); \
+  REGISTER_KERNEL_BUILDER(Name("ResourceSparseApplyProximalAdagrad")  \
+                              .Device(DEVICE_CPU)                     \
+                              .TypeConstraint<T>("T")                 \
+                              .TypeConstraint<Tindices>("Tindices"),  \
                           SparseApplyProximalAdagradOp<T, Tindices>);
 
 REGISTER_KERNELS(float, int32);
@@ -1339,10 +1561,17 @@ class ApplyAdagradDAOp : public OpKernel {
   }
 
   void Compute(OpKernelContext* ctx) override {
-    auto locks = MaybeLockMutexesInOrder(ctx, use_exclusive_lock_, {0, 1});
-    Tensor var = ctx->mutable_input(0, use_exclusive_lock_);
-    Tensor gradient_accum = ctx->mutable_input(1, use_exclusive_lock_);
-    Tensor gradient_squared_accum = ctx->mutable_input(2, use_exclusive_lock_);
+    auto locks =
+        MaybeLockVariableInputMutexesInOrder(ctx, use_exclusive_lock_, {0, 1});
+    Tensor var;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 0, use_exclusive_lock_, &var));
+    Tensor gradient_accum;
+    OP_REQUIRES_OK(ctx, GetInputTensorFromVariable(ctx, 1, use_exclusive_lock_,
+                                                   &gradient_accum));
+    Tensor gradient_squared_accum;
+    OP_REQUIRES_OK(ctx, GetInputTensorFromVariable(ctx, 2, use_exclusive_lock_,
+                                                   &gradient_squared_accum));
     OP_REQUIRES(
         ctx, var.IsInitialized(),
         errors::FailedPrecondition(
@@ -1399,7 +1628,7 @@ class ApplyAdagradDAOp : public OpKernel {
         global_step.scalar<int64>()(), l1.scalar<T>(), l2.scalar<T>(),
         grad.flat<T>());
 
-    ctx->forward_ref_input_to_ref_output(0, 0);
+    MaybeForwardRefInputToRefOutput(ctx, 0, 0);
   }
 
  private:
@@ -1409,10 +1638,17 @@ class ApplyAdagradDAOp : public OpKernel {
 using CPUDevice = Eigen::ThreadPoolDevice;
 using GPUDevice = Eigen::GpuDevice;
 
-#define REGISTER_KERNELS(D, T)                                          \
-  REGISTER_KERNEL_BUILDER(                                              \
-      Name("ApplyAdagradDA").Device(DEVICE_##D).TypeConstraint<T>("T"), \
-      ApplyAdagradDAOp<D##Device, T>);
+#define REGISTER_KERNELS(D, T)                                            \
+  REGISTER_KERNEL_BUILDER(                                                \
+      Name("ApplyAdagradDA").Device(DEVICE_##D).TypeConstraint<T>("T"),   \
+      ApplyAdagradDAOp<D##Device, T>);                                    \
+  REGISTER_KERNEL_BUILDER(Name("ResourceApplyAdagradDA")                  \
+                              .Device(DEVICE_##D)                         \
+                              .HostMemory("var")                          \
+                              .HostMemory("gradient_accumulator")         \
+                              .HostMemory("gradient_squared_accumulator") \
+                              .TypeConstraint<T>("T"),                    \
+                          ApplyAdagradDAOp<D##Device, T>);
 
 REGISTER_KERNELS(CPU, float);
 REGISTER_KERNELS(CPU, double);
@@ -1427,10 +1663,17 @@ class SparseApplyAdagradDAOp : public OpKernel {
   }
 
   void Compute(OpKernelContext* ctx) override NO_THREAD_SAFETY_ANALYSIS {
-    auto locks = MaybeLockMutexesInOrder(ctx, use_exclusive_lock_, {0, 1});
-    Tensor var = ctx->mutable_input(0, use_exclusive_lock_);
-    Tensor gradient_accum = ctx->mutable_input(1, use_exclusive_lock_);
-    Tensor gradient_squared_accum = ctx->mutable_input(2, use_exclusive_lock_);
+    auto locks =
+        MaybeLockVariableInputMutexesInOrder(ctx, use_exclusive_lock_, {0, 1});
+    Tensor var;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 0, use_exclusive_lock_, &var));
+    Tensor gradient_accum;
+    OP_REQUIRES_OK(ctx, GetInputTensorFromVariable(ctx, 1, use_exclusive_lock_,
+                                                   &gradient_accum));
+    Tensor gradient_squared_accum;
+    OP_REQUIRES_OK(ctx, GetInputTensorFromVariable(ctx, 2, use_exclusive_lock_,
+                                                   &gradient_squared_accum));
     OP_REQUIRES(
         ctx, var.IsInitialized(),
         errors::FailedPrecondition(
@@ -1534,10 +1777,10 @@ class SparseApplyAdagradDAOp : public OpKernel {
           ga += g;
           da += g.square();
           if (l1_scalar > 0) {
-            v = (ga.abs() / ga.constant(global_step_scalar)) -
-                ga.constant(l1_scalar);
             v = ga.constant(-1.0) * ga.sign() *
-                v.cwiseMax(static_cast<T>(0.0)) /
+                ((ga.abs() / ga.constant(global_step_scalar)) -
+                 ga.constant(l1_scalar))
+                    .cwiseMax(static_cast<T>(0.0)) /
                 (v.constant(l2_scalar) + da.sqrt() / v.constant(gs_lr));
           } else {
             v = ga.constant(-1.0) * (ga / ga.constant(global_step_scalar)) /
@@ -1580,18 +1823,26 @@ class SparseApplyAdagradDAOp : public OpKernel {
       }
     }
 
-    ctx->forward_ref_input_to_ref_output(0, 0);
+    MaybeForwardRefInputToRefOutput(ctx, 0, 0);
   }
 
  private:
   bool use_exclusive_lock_;
 };
 
-#define REGISTER_KERNELS(T, Tindices)                                \
-  REGISTER_KERNEL_BUILDER(Name("SparseApplyAdagradDA")               \
-                              .Device(DEVICE_CPU)                    \
-                              .TypeConstraint<T>("T")                \
-                              .TypeConstraint<Tindices>("Tindices"), \
+#define REGISTER_KERNELS(T, Tindices)                                     \
+  REGISTER_KERNEL_BUILDER(Name("SparseApplyAdagradDA")                    \
+                              .Device(DEVICE_CPU)                         \
+                              .TypeConstraint<T>("T")                     \
+                              .TypeConstraint<Tindices>("Tindices"),      \
+                          SparseApplyAdagradDAOp<T, Tindices>);           \
+  REGISTER_KERNEL_BUILDER(Name("ResourceSparseApplyAdagradDA")            \
+                              .Device(DEVICE_CPU)                         \
+                              .HostMemory("var")                          \
+                              .HostMemory("gradient_accumulator")         \
+                              .HostMemory("gradient_squared_accumulator") \
+                              .TypeConstraint<T>("T")                     \
+                              .TypeConstraint<Tindices>("Tindices"),      \
                           SparseApplyAdagradDAOp<T, Tindices>);
 
 REGISTER_KERNELS(float, int32);
@@ -1608,11 +1859,18 @@ class ApplyFtrlOp : public OpKernel {
   }
 
   void Compute(OpKernelContext* ctx) override {
-    auto locks = MaybeLockMutexesInOrder(ctx, use_exclusive_lock_, {0, 1, 2});
+    auto locks = MaybeLockVariableInputMutexesInOrder(ctx, use_exclusive_lock_,
+                                                      {0, 1, 2});
 
-    Tensor var = ctx->mutable_input(0, use_exclusive_lock_);
-    Tensor accum = ctx->mutable_input(1, use_exclusive_lock_);
-    Tensor linear = ctx->mutable_input(2, use_exclusive_lock_);
+    Tensor var;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 0, use_exclusive_lock_, &var));
+    Tensor accum;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 1, use_exclusive_lock_, &accum));
+    Tensor linear;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 2, use_exclusive_lock_, &linear));
     OP_REQUIRES(
         ctx, var.IsInitialized(),
         errors::FailedPrecondition(
@@ -1677,7 +1935,7 @@ class ApplyFtrlOp : public OpKernel {
                                     lr.scalar<T>(), l1.scalar<T>(),
                                     l2.scalar<T>(), lr_power.scalar<T>());
 
-    ctx->forward_ref_input_to_ref_output(0, 0);
+    MaybeForwardRefInputToRefOutput(ctx, 0, 0);
   }
 
  private:
@@ -1690,7 +1948,14 @@ using GPUDevice = Eigen::GpuDevice;
 #define REGISTER_KERNELS(D, T)                                     \
   REGISTER_KERNEL_BUILDER(                                         \
       Name("ApplyFtrl").Device(DEVICE_##D).TypeConstraint<T>("T"), \
-      ApplyFtrlOp<D##Device, T>);
+      ApplyFtrlOp<D##Device, T>);                                  \
+  REGISTER_KERNEL_BUILDER(Name("ResourceApplyFtrl")                \
+                              .HostMemory("var")                   \
+                              .HostMemory("accum")                 \
+                              .HostMemory("linear")                \
+                              .Device(DEVICE_##D)                  \
+                              .TypeConstraint<T>("T"),             \
+                          ApplyFtrlOp<D##Device, T>);
 #define REGISTER_CPU_KERNELS(T) REGISTER_KERNELS(CPU, T);
 
 TF_CALL_half(REGISTER_CPU_KERNELS);
@@ -1709,10 +1974,17 @@ class SparseApplyFtrlOp : public OpKernel {
   }
 
   void Compute(OpKernelContext* ctx) override NO_THREAD_SAFETY_ANALYSIS {
-    auto locks = MaybeLockMutexesInOrder(ctx, use_exclusive_lock_, {0, 1, 2});
-    Tensor var = ctx->mutable_input(0, use_exclusive_lock_);
-    Tensor accum = ctx->mutable_input(1, use_exclusive_lock_);
-    Tensor linear = ctx->mutable_input(2, use_exclusive_lock_);
+    auto locks = MaybeLockVariableInputMutexesInOrder(ctx, use_exclusive_lock_,
+                                                      {0, 1, 2});
+    Tensor var;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 0, use_exclusive_lock_, &var));
+    Tensor accum;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 1, use_exclusive_lock_, &accum));
+    Tensor linear;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 2, use_exclusive_lock_, &linear));
     OP_REQUIRES(
         ctx, var.IsInitialized(),
         errors::FailedPrecondition(
@@ -1874,18 +2146,23 @@ class SparseApplyFtrlOp : public OpKernel {
       }
     }
 
-    ctx->forward_ref_input_to_ref_output(0, 0);
+    MaybeForwardRefInputToRefOutput(ctx, 0, 0);
   }
 
  private:
   bool use_exclusive_lock_;
 };
 
-#define REGISTER_KERNELS(T, Tindices)                                \
-  REGISTER_KERNEL_BUILDER(Name("SparseApplyFtrl")                    \
-                              .Device(DEVICE_CPU)                    \
-                              .TypeConstraint<T>("T")                \
-                              .TypeConstraint<Tindices>("Tindices"), \
+#define REGISTER_KERNELS(T, Tindices)                                 \
+  REGISTER_KERNEL_BUILDER(Name("SparseApplyFtrl")                     \
+                              .Device(DEVICE_CPU)                     \
+                              .TypeConstraint<T>("T")                 \
+                              .TypeConstraint<Tindices>("Tindices"),  \
+                          SparseApplyFtrlOp<CPUDevice, T, Tindices>); \
+  REGISTER_KERNEL_BUILDER(Name("ResourceSparseApplyFtrl")             \
+                              .Device(DEVICE_CPU)                     \
+                              .TypeConstraint<T>("T")                 \
+                              .TypeConstraint<Tindices>("Tindices"),  \
                           SparseApplyFtrlOp<CPUDevice, T, Tindices>);
 #define REGISTER_CPU_KERNELS(T) \
   REGISTER_KERNELS(T, int32);   \
@@ -1907,10 +2184,15 @@ class ApplyMomentumOp : public OpKernel {
   }
 
   void Compute(OpKernelContext* ctx) override {
-    auto locks = MaybeLockMutexesInOrder(ctx, use_exclusive_lock_, {0, 1});
+    auto locks =
+        MaybeLockVariableInputMutexesInOrder(ctx, use_exclusive_lock_, {0, 1});
 
-    Tensor var = ctx->mutable_input(0, use_exclusive_lock_);
-    Tensor accum = ctx->mutable_input(1, use_exclusive_lock_);
+    Tensor var;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 0, use_exclusive_lock_, &var));
+    Tensor accum;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 1, use_exclusive_lock_, &accum));
     OP_REQUIRES(
         ctx, var.IsInitialized(),
         errors::FailedPrecondition(
@@ -1944,7 +2226,7 @@ class ApplyMomentumOp : public OpKernel {
     functor::ApplyMomentum<Device, T>()(device, var.flat<T>(), accum.flat<T>(),
                                         lr.scalar<T>(), grad.flat<T>(),
                                         momentum.scalar<T>(), use_nesterov_);
-    ctx->forward_ref_input_to_ref_output(0, 0);
+    MaybeForwardRefInputToRefOutput(ctx, 0, 0);
   }
 
  private:
@@ -1958,7 +2240,13 @@ using GPUDevice = Eigen::GpuDevice;
 #define REGISTER_KERNELS(D, T)                                         \
   REGISTER_KERNEL_BUILDER(                                             \
       Name("ApplyMomentum").Device(DEVICE_##D).TypeConstraint<T>("T"), \
-      ApplyMomentumOp<D##Device, T>);
+      ApplyMomentumOp<D##Device, T>);                                  \
+  REGISTER_KERNEL_BUILDER(Name("ResourceApplyMomentum")                \
+                              .Device(DEVICE_##D)                      \
+                              .HostMemory("var")                       \
+                              .HostMemory("accum")                     \
+                              .TypeConstraint<T>("T"),                 \
+                          ApplyMomentumOp<D##Device, T>);
 #define REGISTER_CPU_KERNELS(T) REGISTER_KERNELS(CPU, T);
 
 TF_CALL_half(REGISTER_CPU_KERNELS);
@@ -1999,10 +2287,15 @@ class SparseApplyMomentumOp : public OpKernel {
   }
 
   void Compute(OpKernelContext* ctx) override NO_THREAD_SAFETY_ANALYSIS {
-    auto locks = MaybeLockMutexesInOrder(ctx, use_exclusive_lock_, {0, 1});
+    auto locks =
+        MaybeLockVariableInputMutexesInOrder(ctx, use_exclusive_lock_, {0, 1});
 
-    Tensor var = ctx->mutable_input(0, use_exclusive_lock_);
-    Tensor accum = ctx->mutable_input(1, use_exclusive_lock_);
+    Tensor var;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 0, use_exclusive_lock_, &var));
+    Tensor accum;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 1, use_exclusive_lock_, &accum));
     OP_REQUIRES(
         ctx, var.IsInitialized(),
         errors::FailedPrecondition(
@@ -2072,7 +2365,7 @@ class SparseApplyMomentumOp : public OpKernel {
       }
     }
 
-    ctx->forward_ref_input_to_ref_output(0, 0);
+    MaybeForwardRefInputToRefOutput(ctx, 0, 0);
   }
 
  private:
@@ -2082,6 +2375,11 @@ class SparseApplyMomentumOp : public OpKernel {
 
 #define REGISTER_KERNELS(T, Tindices)                                \
   REGISTER_KERNEL_BUILDER(Name("SparseApplyMomentum")                \
+                              .Device(DEVICE_CPU)                    \
+                              .TypeConstraint<T>("T")                \
+                              .TypeConstraint<Tindices>("Tindices"), \
+                          SparseApplyMomentumOp<T, Tindices>);       \
+  REGISTER_KERNEL_BUILDER(Name("ResourceSparseApplyMomentum")        \
                               .Device(DEVICE_CPU)                    \
                               .TypeConstraint<T>("T")                \
                               .TypeConstraint<Tindices>("Tindices"), \
@@ -2102,14 +2400,22 @@ class ApplyAdamOp : public OpKernel {
  public:
   explicit ApplyAdamOp(OpKernelConstruction* ctx) : OpKernel(ctx) {
     OP_REQUIRES_OK(ctx, ctx->GetAttr("use_locking", &use_exclusive_lock_));
+    OP_REQUIRES_OK(ctx, ctx->GetAttr("use_nesterov", &use_nesterov_));
   }
 
   void Compute(OpKernelContext* ctx) override {
-    auto locks = MaybeLockMutexesInOrder(ctx, use_exclusive_lock_, {0, 1, 2});
+    auto locks = MaybeLockVariableInputMutexesInOrder(ctx, use_exclusive_lock_,
+                                                      {0, 1, 2});
 
-    Tensor var = ctx->mutable_input(0, use_exclusive_lock_);
-    Tensor m = ctx->mutable_input(1, use_exclusive_lock_);
-    Tensor v = ctx->mutable_input(2, use_exclusive_lock_);
+    Tensor var;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 0, use_exclusive_lock_, &var));
+    Tensor m;
+    OP_REQUIRES_OK(ctx,
+                   GetInputTensorFromVariable(ctx, 1, use_exclusive_lock_, &m));
+    Tensor v;
+    OP_REQUIRES_OK(ctx,
+                   GetInputTensorFromVariable(ctx, 2, use_exclusive_lock_, &v));
     OP_REQUIRES(
         ctx, var.IsInitialized(),
         errors::FailedPrecondition(
@@ -2165,18 +2471,133 @@ class ApplyAdamOp : public OpKernel {
                                 grad.shape().DebugString()));
 
     const Device& device = ctx->template eigen_device<Device>();
-    functor::ApplyAdam<Device, T>()(device, var.flat<T>(), m.flat<T>(),
-                                    v.flat<T>(), beta1_power.scalar<T>(),
-                                    beta2_power.scalar<T>(), lr.scalar<T>(),
-                                    beta1.scalar<T>(), beta2.scalar<T>(),
-                                    epsilon.scalar<T>(), grad.flat<T>());
+    functor::ApplyAdam<Device, T>()(
+        device, var.flat<T>(), m.flat<T>(), v.flat<T>(),
+        beta1_power.scalar<T>(), beta2_power.scalar<T>(), lr.scalar<T>(),
+        beta1.scalar<T>(), beta2.scalar<T>(), epsilon.scalar<T>(),
+        grad.flat<T>(), use_nesterov_);
 
-    ctx->forward_ref_input_to_ref_output(0, 0);
+    MaybeForwardRefInputToRefOutput(ctx, 0, 0);
+  }
+
+ private:
+  bool use_exclusive_lock_;
+  bool use_nesterov_;
+};
+
+#ifdef TENSORFLOW_USE_SYCL
+template <typename T>
+class ApplyAdamOp < SYCLDevice, T> : public OpKernel {
+ public:
+  explicit ApplyAdamOp(OpKernelConstruction* ctx) : OpKernel(ctx) {
+    OP_REQUIRES_OK(ctx, ctx->GetAttr("use_locking", &use_exclusive_lock_));
+  }
+
+  void Compute(OpKernelContext* ctx) override {
+    auto locks = MaybeLockVariableInputMutexesInOrder(ctx, use_exclusive_lock_, {0, 1, 2});
+
+    Tensor var;
+    OP_REQUIRES_OK(ctx, GetInputTensorFromVariable(ctx, 0, use_exclusive_lock_, &var));
+    Tensor m;
+    OP_REQUIRES_OK(ctx, GetInputTensorFromVariable(ctx, 1, use_exclusive_lock_, &m));
+    Tensor v;
+    OP_REQUIRES_OK(ctx, GetInputTensorFromVariable(ctx, 2, use_exclusive_lock_, &v));
+    OP_REQUIRES(
+        ctx, var.IsInitialized(),
+        errors::FailedPrecondition(
+            "Attempting to use uninitialized variables: ", def().input(0)));
+    OP_REQUIRES(
+        ctx, m.IsInitialized(),
+        errors::FailedPrecondition(
+            "Attempting to use uninitialized variables: ", def().input(1)));
+    OP_REQUIRES(
+        ctx, v.IsInitialized(),
+        errors::FailedPrecondition(
+            "Attempting to use uninitialized variables: ", def().input(2)));
+
+    const Tensor& beta1_power_dev = ctx->input(3);
+    const Tensor& beta2_power_dev = ctx->input(4);
+    const Tensor& lr_dev = ctx->input(5);
+    const Tensor& beta1_dev = ctx->input(6);
+    const Tensor& beta2_dev = ctx->input(7);
+    const Tensor& epsilon_dev = ctx->input(8);
+
+    T beta1_power = 0;
+    T beta2_power = 0;
+    T lr = 0;
+    T beta1 = 0;
+    T beta2 = 0;
+    T epsilon = 0;
+
+    auto device = ctx->eigen_sycl_device();
+    auto size = sizeof(T);
+    auto src_ptr = GetBase(&beta1_power_dev);
+    device.memcpyDeviceToHost(&beta1_power, static_cast<const T *>(src_ptr), size);
+
+    src_ptr = GetBase(&beta2_power_dev);
+    device.memcpyDeviceToHost(&beta2_power, static_cast<const T *>(src_ptr), size);
+
+    src_ptr = GetBase(&lr_dev);
+    device.memcpyDeviceToHost(&lr, static_cast<const T *>(src_ptr), size);
+
+    src_ptr = GetBase(&beta1_dev);
+    device.memcpyDeviceToHost(&beta1, static_cast<const T *>(src_ptr), size);
+
+    src_ptr = GetBase(&beta2_dev);
+    device.memcpyDeviceToHost(&beta2, static_cast<const T *>(src_ptr), size);
+
+    src_ptr = GetBase(&epsilon_dev);
+    device.memcpyDeviceToHost(&epsilon, static_cast<const T *>(src_ptr), size);
+
+
+    OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(beta1_power_dev.shape()),
+                errors::InvalidArgument("beta1_power is not a scalar: ",
+                                        beta1_power_dev.shape().DebugString()));
+    OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(beta2_power_dev.shape()),
+                errors::InvalidArgument("beta2_power is not a scalar: ",
+                                        beta2_power_dev.shape().DebugString()));
+    OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(lr_dev.shape()),
+                errors::InvalidArgument("lr is not a scalar : ",
+                                        lr_dev.shape().DebugString()));
+    OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(beta1_dev.shape()),
+                errors::InvalidArgument("beta1 is not a scalar: ",
+                                        beta1_dev.shape().DebugString()));
+    OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(beta2_dev.shape()),
+                errors::InvalidArgument("beta2 is not a scalar: ",
+                                        beta2_dev.shape().DebugString()));
+    OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(epsilon_dev.shape()),
+                errors::InvalidArgument("epsilon is not a scalar: ",
+                                        epsilon_dev.shape().DebugString()));
+
+    const Tensor& grad = ctx->input(9);
+
+    OP_REQUIRES(ctx, var.shape().IsSameSize(m.shape()),
+                errors::InvalidArgument("var and m do not have the same shape",
+                                        var.shape().DebugString(), " ",
+                                        m.shape().DebugString()));
+    OP_REQUIRES(ctx, var.shape().IsSameSize(v.shape()),
+                errors::InvalidArgument("var and v do not have the same shape",
+                                        var.shape().DebugString(), " ",
+                                        v.shape().DebugString()));
+    OP_REQUIRES(
+        ctx, var.shape().IsSameSize(grad.shape()),
+        errors::InvalidArgument("var and grad do not have the same shape",
+                                var.shape().DebugString(), " ",
+                                grad.shape().DebugString()));
+
+    functor::ApplyAdamSYCL<T>()(device, var.flat<T>(), m.flat<T>(),
+                                    v.flat<T>(), beta1_power,
+                                    beta2_power, lr,
+                                    beta1, beta2,
+                                    epsilon, grad.flat<T>());
+
+    MaybeForwardRefInputToRefOutput(ctx, 0, 0);
   }
 
  private:
   bool use_exclusive_lock_;
 };
+#endif // TENSORFLOW_USE_SYCL
 
 using CPUDevice = Eigen::ThreadPoolDevice;
 using GPUDevice = Eigen::GpuDevice;
@@ -2184,7 +2605,14 @@ using GPUDevice = Eigen::GpuDevice;
 #define REGISTER_KERNELS(D, T)                                     \
   REGISTER_KERNEL_BUILDER(                                         \
       Name("ApplyAdam").Device(DEVICE_##D).TypeConstraint<T>("T"), \
-      ApplyAdamOp<D##Device, T>);
+      ApplyAdamOp<D##Device, T>);                                  \
+  REGISTER_KERNEL_BUILDER(Name("ResourceApplyAdam")                \
+                              .HostMemory("var")                   \
+                              .HostMemory("m")                     \
+                              .HostMemory("v")                     \
+                              .Device(DEVICE_##D)                  \
+                              .TypeConstraint<T>("T"),             \
+                          ApplyAdamOp<D##Device, T>);
 #define REGISTER_CPU_KERNELS(T) REGISTER_KERNELS(CPU, T);
 
 TF_CALL_half(REGISTER_CPU_KERNELS);
@@ -2195,6 +2623,7 @@ TF_CALL_double(REGISTER_CPU_KERNELS);
 #define REGISTER_SYCL_KERNELS(T) REGISTER_KERNELS(SYCL, T);
 
 TF_CALL_float(REGISTER_SYCL_KERNELS);
+TF_CALL_double(REGISTER_SYCL_KERNELS);
 #endif
 
 #if GOOGLE_CUDA
@@ -2211,7 +2640,7 @@ namespace functor {
       typename TTypes<T>::ConstScalar beta1,                  \
       typename TTypes<T>::ConstScalar beta2,                  \
       typename TTypes<T>::ConstScalar epsilon,                \
-      typename TTypes<T>::ConstFlat grad);                    \
+      typename TTypes<T>::ConstFlat grad, bool use_nesterov); \
   extern template struct ApplyAdam<GPUDevice, T>;
 DECLARE_GPU_SPEC(Eigen::half);
 DECLARE_GPU_SPEC(float);
@@ -2234,11 +2663,18 @@ class ApplyRMSPropOp : public OpKernel {
   }
 
   void Compute(OpKernelContext* ctx) override {
-    auto locks = MaybeLockMutexesInOrder(ctx, use_exclusive_lock_, {0, 1, 2});
+    auto locks = MaybeLockVariableInputMutexesInOrder(ctx, use_exclusive_lock_,
+                                                      {0, 1, 2});
 
-    Tensor var = ctx->mutable_input(0, use_exclusive_lock_);
-    Tensor ms = ctx->mutable_input(1, use_exclusive_lock_);
-    Tensor mom = ctx->mutable_input(2, use_exclusive_lock_);
+    Tensor var;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 0, use_exclusive_lock_, &var));
+    Tensor ms;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 1, use_exclusive_lock_, &ms));
+    Tensor mom;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 2, use_exclusive_lock_, &mom));
 
     OP_REQUIRES(
         ctx, var.IsInitialized(),
@@ -2294,7 +2730,7 @@ class ApplyRMSPropOp : public OpKernel {
                                        rho.scalar<T>(), momentum.scalar<T>(),
                                        epsilon.scalar<T>(), grad.flat<T>());
 
-    ctx->forward_ref_input_to_ref_output(0, 0);
+    MaybeForwardRefInputToRefOutput(ctx, 0, 0);
   }
 
  private:
@@ -2309,13 +2745,21 @@ class ApplyCenteredRMSPropOp : public OpKernel {
   }
 
   void Compute(OpKernelContext* ctx) override {
-    auto locks =
-        MaybeLockMutexesInOrder(ctx, use_exclusive_lock_, {0, 1, 2, 3});
+    auto locks = MaybeLockVariableInputMutexesInOrder(ctx, use_exclusive_lock_,
+                                                      {0, 1, 2, 3});
 
-    Tensor var = ctx->mutable_input(0, use_exclusive_lock_);
-    Tensor mg = ctx->mutable_input(1, use_exclusive_lock_);
-    Tensor ms = ctx->mutable_input(2, use_exclusive_lock_);
-    Tensor mom = ctx->mutable_input(3, use_exclusive_lock_);
+    Tensor var;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 0, use_exclusive_lock_, &var));
+    Tensor mg;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 1, use_exclusive_lock_, &mg));
+    Tensor ms;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 2, use_exclusive_lock_, &ms));
+    Tensor mom;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 3, use_exclusive_lock_, &mom));
 
     OP_REQUIRES(
         ctx, var.IsInitialized(),
@@ -2379,7 +2823,7 @@ class ApplyCenteredRMSPropOp : public OpKernel {
         device, var.flat<T>(), mg.flat<T>(), ms.flat<T>(), mom.flat<T>(),
         lr.scalar<T>(), rho.scalar<T>(), momentum.scalar<T>(),
         epsilon.scalar<T>(), grad.flat<T>());
-    ctx->forward_ref_input_to_ref_output(0, 0);
+    MaybeForwardRefInputToRefOutput(ctx, 0, 0);
   }
 
  private:
@@ -2395,7 +2839,22 @@ using GPUDevice = Eigen::GpuDevice;
       ApplyRMSPropOp<D##Device, T>);                                          \
   REGISTER_KERNEL_BUILDER(                                                    \
       Name("ApplyCenteredRMSProp").Device(DEVICE_##D).TypeConstraint<T>("T"), \
-      ApplyCenteredRMSPropOp<D##Device, T>);
+      ApplyCenteredRMSPropOp<D##Device, T>);                                  \
+  REGISTER_KERNEL_BUILDER(Name("ResourceApplyRMSProp")                        \
+                              .Device(DEVICE_##D)                             \
+                              .HostMemory("var")                              \
+                              .HostMemory("ms")                               \
+                              .HostMemory("mom")                              \
+                              .TypeConstraint<T>("T"),                        \
+                          ApplyRMSPropOp<D##Device, T>);                      \
+  REGISTER_KERNEL_BUILDER(Name("ResourceApplyCenteredRMSProp")                \
+                              .Device(DEVICE_##D)                             \
+                              .HostMemory("var")                              \
+                              .HostMemory("mg")                               \
+                              .HostMemory("ms")                               \
+                              .HostMemory("mom")                              \
+                              .TypeConstraint<T>("T"),                        \
+                          ApplyCenteredRMSPropOp<D##Device, T>);
 #define REGISTER_CPU_KERNELS(T) REGISTER_KERNELS(CPU, T);
 
 TF_CALL_half(REGISTER_CPU_KERNELS);
@@ -2447,11 +2906,18 @@ class SparseApplyRMSPropOp : public OpKernel {
   }
 
   void Compute(OpKernelContext* ctx) override NO_THREAD_SAFETY_ANALYSIS {
-    auto locks = MaybeLockMutexesInOrder(ctx, use_exclusive_lock_, {0, 1, 2});
+    auto locks = MaybeLockVariableInputMutexesInOrder(ctx, use_exclusive_lock_,
+                                                      {0, 1, 2});
 
-    Tensor var = ctx->mutable_input(0, use_exclusive_lock_);
-    Tensor ms = ctx->mutable_input(1, use_exclusive_lock_);
-    Tensor mom = ctx->mutable_input(2, use_exclusive_lock_);
+    Tensor var;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 0, use_exclusive_lock_, &var));
+    Tensor ms;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 1, use_exclusive_lock_, &ms));
+    Tensor mom;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 2, use_exclusive_lock_, &mom));
 
     OP_REQUIRES(
         ctx, var.IsInitialized(),
@@ -2552,7 +3018,7 @@ class SparseApplyRMSPropOp : public OpKernel {
       }
     }
 
-    ctx->forward_ref_input_to_ref_output(0, 0);
+    MaybeForwardRefInputToRefOutput(ctx, 0, 0);
   }
 
  private:
@@ -2569,13 +3035,21 @@ class SparseApplyCenteredRMSPropOp : public OpKernel {
   }
 
   void Compute(OpKernelContext* ctx) override NO_THREAD_SAFETY_ANALYSIS {
-    auto locks =
-        MaybeLockMutexesInOrder(ctx, use_exclusive_lock_, {0, 1, 2, 3});
+    auto locks = MaybeLockVariableInputMutexesInOrder(ctx, use_exclusive_lock_,
+                                                      {0, 1, 2, 3});
 
-    Tensor var = ctx->mutable_input(0, use_exclusive_lock_);
-    Tensor mg = ctx->mutable_input(1, use_exclusive_lock_);
-    Tensor ms = ctx->mutable_input(2, use_exclusive_lock_);
-    Tensor mom = ctx->mutable_input(3, use_exclusive_lock_);
+    Tensor var;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 0, use_exclusive_lock_, &var));
+    Tensor mg;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 1, use_exclusive_lock_, &mg));
+    Tensor ms;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 2, use_exclusive_lock_, &ms));
+    Tensor mom;
+    OP_REQUIRES_OK(
+        ctx, GetInputTensorFromVariable(ctx, 3, use_exclusive_lock_, &mom));
 
     OP_REQUIRES(
         ctx, var.IsInitialized(),
@@ -2685,23 +3159,33 @@ class SparseApplyCenteredRMSPropOp : public OpKernel {
       }
     }
 
-    ctx->forward_ref_input_to_ref_output(0, 0);
+    MaybeForwardRefInputToRefOutput(ctx, 0, 0);
   }
 
  private:
   bool use_exclusive_lock_;
 };
 
-#define REGISTER_KERNELS(T, Tindices)                                \
-  REGISTER_KERNEL_BUILDER(Name("SparseApplyRMSProp")                 \
-                              .Device(DEVICE_CPU)                    \
-                              .TypeConstraint<T>("T")                \
-                              .TypeConstraint<Tindices>("Tindices"), \
-                          SparseApplyRMSPropOp<T, Tindices>);        \
-  REGISTER_KERNEL_BUILDER(Name("SparseApplyCenteredRMSProp")         \
-                              .Device(DEVICE_CPU)                    \
-                              .TypeConstraint<T>("T")                \
-                              .TypeConstraint<Tindices>("Tindices"), \
+#define REGISTER_KERNELS(T, Tindices)                                 \
+  REGISTER_KERNEL_BUILDER(Name("SparseApplyRMSProp")                  \
+                              .Device(DEVICE_CPU)                     \
+                              .TypeConstraint<T>("T")                 \
+                              .TypeConstraint<Tindices>("Tindices"),  \
+                          SparseApplyRMSPropOp<T, Tindices>);         \
+  REGISTER_KERNEL_BUILDER(Name("SparseApplyCenteredRMSProp")          \
+                              .Device(DEVICE_CPU)                     \
+                              .TypeConstraint<T>("T")                 \
+                              .TypeConstraint<Tindices>("Tindices"),  \
+                          SparseApplyCenteredRMSPropOp<T, Tindices>); \
+  REGISTER_KERNEL_BUILDER(Name("ResourceSparseApplyRMSProp")          \
+                              .Device(DEVICE_CPU)                     \
+                              .TypeConstraint<T>("T")                 \
+                              .TypeConstraint<Tindices>("Tindices"),  \
+                          SparseApplyRMSPropOp<T, Tindices>);         \
+  REGISTER_KERNEL_BUILDER(Name("ResourceSparseApplyCenteredRMSProp")  \
+                              .Device(DEVICE_CPU)                     \
+                              .TypeConstraint<T>("T")                 \
+                              .TypeConstraint<Tindices>("Tindices"),  \
                           SparseApplyCenteredRMSPropOp<T, Tindices>);
 
 REGISTER_KERNELS(Eigen::half, int32);

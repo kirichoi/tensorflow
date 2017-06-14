@@ -7,6 +7,8 @@ exports_files(["LICENSE"])
 
 package(default_visibility = ["//tensorflow:__subpackages__"])
 
+load("//tensorflow:tensorflow.bzl", "py_test")
+
 py_library(
     name = "evaluation",
     srcs = ["python/slim/evaluation.py"],
@@ -23,6 +25,7 @@ py_library(
 
 py_test(
     name = "evaluation_test",
+    size = "small",
     srcs = ["python/slim/evaluation_test.py"],
     srcs_version = "PY2AND3",
     deps = [
@@ -52,6 +55,7 @@ py_library(
     srcs_version = "PY2AND3",
     deps = [
         "//tensorflow/contrib/framework:framework_py",
+        "//tensorflow/contrib/training:training_py",
         "//tensorflow/python:array_ops",
         "//tensorflow/python:client",
         "//tensorflow/python:clip_ops",
@@ -141,6 +145,7 @@ py_library(
         ":learning",
         ":model_analyzer",
         ":queues",
+        ":summaries",
         "//tensorflow/contrib/framework:framework_py",
         "//tensorflow/contrib/layers:layers_py",
         "//tensorflow/contrib/losses:losses_py",
@@ -154,6 +159,33 @@ py_library(
         "//tensorflow/contrib/slim/python/slim/data:prefetch_queue",
         "//tensorflow/contrib/slim/python/slim/data:tfexample_decoder",
         "//tensorflow/python:util",
+    ],
+)
+
+py_library(
+    name = "summaries",
+    srcs = ["python/slim/summaries.py"],
+    srcs_version = "PY2AND3",
+    deps = [
+        "//tensorflow/python:framework",
+        "//tensorflow/python:logging_ops",
+        "//tensorflow/python:nn",
+        "//tensorflow/python:summary",
+    ],
+)
+
+py_test(
+    name = "summaries_test",
+    size = "small",
+    srcs = ["python/slim/summaries_test.py"],
+    srcs_version = "PY2AND3",
+    deps = [
+        ":summaries",
+        "//tensorflow/python:array_ops",
+        "//tensorflow/python:client_testlib",
+        "//tensorflow/python:framework",
+        "//tensorflow/python:platform",
+        "//tensorflow/python:summary",
     ],
 )
 

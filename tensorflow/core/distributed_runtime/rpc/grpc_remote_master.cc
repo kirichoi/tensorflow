@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "tensorflow/core/distributed_runtime/rpc/grpc_remote_master.h"
 
+#include <utility>
+
 #include "tensorflow/core/distributed_runtime/call_options.h"
 #include "tensorflow/core/distributed_runtime/master_interface.h"
 #include "tensorflow/core/distributed_runtime/rpc/grpc_master_service_impl.h"
@@ -29,7 +31,7 @@ namespace tensorflow {
 // that uses gRPC to talk to the Master service.
 class GrpcRemoteMaster : public MasterInterface {
  public:
-  explicit GrpcRemoteMaster(SharedGrpcChannelPtr client_channel)
+  explicit GrpcRemoteMaster(const SharedGrpcChannelPtr& client_channel)
       : stub_(grpc::MasterService::NewStub(client_channel)) {}
 
   ~GrpcRemoteMaster() override {}
@@ -62,11 +64,12 @@ class GrpcRemoteMaster : public MasterInterface {
   }
 
   Status RunStep(CallOptions* call_options, RunStepRequestWrapper* request,
-                 RunStepResponse* response) override {
+                 MutableRunStepResponseWrapper* response) override {
     ::grpc::ClientContext ctx;
     ctx.set_fail_fast(false);
     SetDeadline(&ctx, call_options->GetTimeout());
-    return FromGrpcStatus(stub_->RunStep(&ctx, request->ToProto(), response));
+    return FromGrpcStatus(stub_->RunStep(&ctx, request->ToProto(),
+                                         get_proto_from_wrapper(response)));
   }
 
   Status CloseSession(CallOptions* call_options,
@@ -105,7 +108,7 @@ class GrpcRemoteMaster : public MasterInterface {
   }
 };
 
-MasterInterface* NewGrpcMaster(SharedGrpcChannelPtr channel) {
+MasterInterface* NewGrpcMaster(const SharedGrpcChannelPtr& channel) {
   return new GrpcRemoteMaster(channel);
 }
 

@@ -19,59 +19,68 @@ from __future__ import division
 from __future__ import print_function
 
 import math
+
 import numpy as np
 from scipy import special
 
 from tensorflow.contrib.distributions.python.ops import distribution_util
+from tensorflow.contrib.linalg.python.ops import linear_operator_diag
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
+from tensorflow.python.framework import tensor_shape
 from tensorflow.python.framework import tensor_util
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import gradient_checker
 from tensorflow.python.ops import gradients_impl
 from tensorflow.python.ops import math_ops
+from tensorflow.python.ops import nn_ops
+import tensorflow.python.ops.nn_grad  # pylint: disable=unused-import
 from tensorflow.python.platform import test
+from tensorflow.python.platform import tf_logging as logging
 
 
 class AssertCloseTest(test.TestCase):
 
   def testAssertCloseIntegerDtype(self):
-    x = [1, 5, 10, 15, 20]
+    x = array_ops.placeholder(dtypes.int32)
     y = x
-    z = [2, 5, 10, 15, 20]
+    z = array_ops.placeholder(dtypes.int32)
+    feed_dict = {x: [1, 5, 10, 15, 20], z: [2, 5, 10, 15, 20]}
     with self.test_session():
       with ops.control_dependencies([distribution_util.assert_close(x, y)]):
-        array_ops.identity(x).eval()
+        array_ops.identity(x).eval(feed_dict=feed_dict)
 
       with ops.control_dependencies([distribution_util.assert_close(y, x)]):
-        array_ops.identity(x).eval()
+        array_ops.identity(x).eval(feed_dict=feed_dict)
 
       with self.assertRaisesOpError("Condition x ~= y"):
         with ops.control_dependencies([distribution_util.assert_close(x, z)]):
-          array_ops.identity(x).eval()
+          array_ops.identity(x).eval(feed_dict=feed_dict)
 
       with self.assertRaisesOpError("Condition x ~= y"):
         with ops.control_dependencies([distribution_util.assert_close(y, z)]):
-          array_ops.identity(y).eval()
+          array_ops.identity(y).eval(feed_dict=feed_dict)
 
   def testAssertCloseNonIntegerDtype(self):
-    x = np.array([1., 5, 10, 15, 20], dtype=np.float32)
+    x = array_ops.placeholder(dtypes.float32)
     y = x + 1e-8
-    z = [2., 5, 10, 15, 20]
+    z = array_ops.placeholder(dtypes.float32)
+    feed_dict = {x: [1., 5, 10, 15, 20], z: [2., 5, 10, 15, 20]}
     with self.test_session():
       with ops.control_dependencies([distribution_util.assert_close(x, y)]):
-        array_ops.identity(x).eval()
+        array_ops.identity(x).eval(feed_dict=feed_dict)
 
       with ops.control_dependencies([distribution_util.assert_close(y, x)]):
-        array_ops.identity(x).eval()
+        array_ops.identity(x).eval(feed_dict=feed_dict)
 
       with self.assertRaisesOpError("Condition x ~= y"):
         with ops.control_dependencies([distribution_util.assert_close(x, z)]):
-          array_ops.identity(x).eval()
+          array_ops.identity(x).eval(feed_dict=feed_dict)
 
       with self.assertRaisesOpError("Condition x ~= y"):
         with ops.control_dependencies([distribution_util.assert_close(y, z)]):
-          array_ops.identity(y).eval()
+          array_ops.identity(y).eval(feed_dict=feed_dict)
 
   def testAssertCloseEpsilon(self):
     x = [0., 5, 10, 15, 20]
@@ -93,85 +102,161 @@ class AssertCloseTest(test.TestCase):
 
   def testAssertIntegerForm(self):
     # This should only be detected as an integer.
-    x = [1., 5, 10, 15, 20]
-    y = [1.1, 5, 10, 15, 20]
+    x = array_ops.placeholder(dtypes.float32)
+    y = array_ops.placeholder(dtypes.float32)
     # First component isn't less than float32.eps = 1e-7
-    z = [1.0001, 5, 10, 15, 20]
+    z = array_ops.placeholder(dtypes.float32)
     # This shouldn"t be detected as an integer.
-    w = [1e-8, 5, 10, 15, 20]
+    w = array_ops.placeholder(dtypes.float32)
+    feed_dict = {x: [1., 5, 10, 15, 20], y: [1.1, 5, 10, 15, 20],
+                 z: [1.0001, 5, 10, 15, 20], w: [1e-8, 5, 10, 15, 20]}
     with self.test_session():
       with ops.control_dependencies([distribution_util.assert_integer_form(x)]):
-        array_ops.identity(x).eval()
+        array_ops.identity(x).eval(feed_dict=feed_dict)
 
       with self.assertRaisesOpError("x has non-integer components"):
         with ops.control_dependencies(
             [distribution_util.assert_integer_form(y)]):
-          array_ops.identity(y).eval()
+          array_ops.identity(y).eval(feed_dict=feed_dict)
 
       with self.assertRaisesOpError("x has non-integer components"):
         with ops.control_dependencies(
             [distribution_util.assert_integer_form(z)]):
-          array_ops.identity(z).eval()
+          array_ops.identity(z).eval(feed_dict=feed_dict)
 
       with self.assertRaisesOpError("x has non-integer components"):
         with ops.control_dependencies(
             [distribution_util.assert_integer_form(w)]):
-          array_ops.identity(w).eval()
+          array_ops.identity(w).eval(feed_dict=feed_dict)
 
 
-class GetLogitsAndProbTest(test.TestCase):
+class ShapesFromLocAndScaleTest(test.TestCase):
 
-  def testGetLogitsAndProbImproperArguments(self):
+  def test_static_loc_static_scale_non_matching_event_size_raises(self):
+    loc = constant_op.constant(np.zeros((2, 4)))
+    scale = linear_operator_diag.LinearOperatorDiag(np.ones((5, 1, 3)))
+    with self.assertRaisesRegexp(ValueError, "could not be broadcast"):
+      distribution_util.shapes_from_loc_and_scale(loc, scale)
+
+  def test_static_loc_static_scale(self):
+    loc = constant_op.constant(np.zeros((2, 3)))
+    scale = linear_operator_diag.LinearOperatorDiag(np.ones((5, 1, 3)))
+    batch_shape, event_shape = distribution_util.shapes_from_loc_and_scale(
+        loc, scale)
+
+    self.assertEqual(tensor_shape.TensorShape([5, 2]), batch_shape)
+    self.assertEqual(tensor_shape.TensorShape([3]), event_shape)
+
+  def test_static_loc_dynamic_scale(self):
+    loc = constant_op.constant(np.zeros((2, 3)))
+    diag = array_ops.placeholder(dtypes.float64)
+    scale = linear_operator_diag.LinearOperatorDiag(diag)
+    with self.test_session() as sess:
+      batch_shape, event_shape = sess.run(
+          distribution_util.shapes_from_loc_and_scale(loc, scale),
+          feed_dict={diag: np.ones((5, 1, 3))})
+      self.assertAllEqual([5, 2], batch_shape)
+      self.assertAllEqual([3], event_shape)
+
+  def test_dynamic_loc_static_scale(self):
+    loc = array_ops.placeholder(dtypes.float64)
+    diag = constant_op.constant(np.ones((5, 2, 3)))
+    scale = linear_operator_diag.LinearOperatorDiag(diag)
+    with self.test_session():
+      batch_shape, event_shape = distribution_util.shapes_from_loc_and_scale(
+          loc, scale)
+      # batch_shape depends on both args, and so is dynamic.  Since loc did not
+      # have static shape, we inferred event shape entirely from scale, and this
+      # is available statically.
+      self.assertAllEqual(
+          [5, 2], batch_shape.eval(feed_dict={loc: np.zeros((2, 3))}))
+      self.assertAllEqual([3], event_shape)
+
+  def test_dynamic_loc_dynamic_scale(self):
+    loc = array_ops.placeholder(dtypes.float64)
+    diag = array_ops.placeholder(dtypes.float64)
+    scale = linear_operator_diag.LinearOperatorDiag(diag)
+    with self.test_session() as sess:
+      batch_shape, event_shape = sess.run(
+          distribution_util.shapes_from_loc_and_scale(loc, scale),
+          feed_dict={diag: np.ones((5, 2, 3)), loc: np.zeros((2, 3))})
+      self.assertAllEqual([5, 2], batch_shape)
+      self.assertAllEqual([3], event_shape)
+
+  def test_none_loc_static_scale(self):
+    loc = None
+    scale = linear_operator_diag.LinearOperatorDiag(np.ones((5, 1, 3)))
+    batch_shape, event_shape = distribution_util.shapes_from_loc_and_scale(
+        loc, scale)
+
+    self.assertEqual(tensor_shape.TensorShape([5, 1]), batch_shape)
+    self.assertEqual(tensor_shape.TensorShape([3]), event_shape)
+
+  def test_none_loc_dynamic_scale(self):
+    loc = None
+    diag = array_ops.placeholder(dtypes.float64)
+    scale = linear_operator_diag.LinearOperatorDiag(diag)
+    with self.test_session() as sess:
+      batch_shape, event_shape = sess.run(
+          distribution_util.shapes_from_loc_and_scale(loc, scale),
+          feed_dict={diag: np.ones((5, 1, 3))})
+      self.assertAllEqual([5, 1], batch_shape)
+      self.assertAllEqual([3], event_shape)
+
+
+class GetLogitsAndProbsTest(test.TestCase):
+
+  def testGetLogitsAndProbsImproperArguments(self):
     with self.test_session():
       with self.assertRaises(ValueError):
-        distribution_util.get_logits_and_prob(logits=None, p=None)
+        distribution_util.get_logits_and_probs(logits=None, probs=None)
 
       with self.assertRaises(ValueError):
-        distribution_util.get_logits_and_prob(logits=[0.1], p=[0.1])
+        distribution_util.get_logits_and_probs(logits=[0.1], probs=[0.1])
 
-  def testGetLogitsAndProbLogits(self):
+  def testGetLogitsAndProbsLogits(self):
     p = np.array([0.01, 0.2, 0.5, 0.7, .99], dtype=np.float32)
     logits = special.logit(p)
 
     with self.test_session():
-      new_logits, new_p = distribution_util.get_logits_and_prob(
+      new_logits, new_p = distribution_util.get_logits_and_probs(
           logits=logits, validate_args=True)
 
       self.assertAllClose(p, new_p.eval())
       self.assertAllClose(logits, new_logits.eval())
 
-  def testGetLogitsAndProbLogitsMultidimensional(self):
+  def testGetLogitsAndProbsLogitsMultidimensional(self):
     p = np.array([0.2, 0.3, 0.5], dtype=np.float32)
     logits = np.log(p)
 
     with self.test_session():
-      new_logits, new_p = distribution_util.get_logits_and_prob(
+      new_logits, new_p = distribution_util.get_logits_and_probs(
           logits=logits, multidimensional=True, validate_args=True)
 
       self.assertAllClose(new_p.eval(), p)
       self.assertAllClose(new_logits.eval(), logits)
 
-  def testGetLogitsAndProbProbability(self):
+  def testGetLogitsAndProbsProbability(self):
     p = np.array([0.01, 0.2, 0.5, 0.7, .99], dtype=np.float32)
 
     with self.test_session():
-      new_logits, new_p = distribution_util.get_logits_and_prob(
-          p=p, validate_args=True)
+      new_logits, new_p = distribution_util.get_logits_and_probs(
+          probs=p, validate_args=True)
 
       self.assertAllClose(special.logit(p), new_logits.eval())
       self.assertAllClose(p, new_p.eval())
 
-  def testGetLogitsAndProbProbabilityMultidimensional(self):
+  def testGetLogitsAndProbsProbabilityMultidimensional(self):
     p = np.array([[0.3, 0.4, 0.3], [0.1, 0.5, 0.4]], dtype=np.float32)
 
     with self.test_session():
-      new_logits, new_p = distribution_util.get_logits_and_prob(
-          p=p, multidimensional=True, validate_args=True)
+      new_logits, new_p = distribution_util.get_logits_and_probs(
+          probs=p, multidimensional=True, validate_args=True)
 
       self.assertAllClose(np.log(p), new_logits.eval())
       self.assertAllClose(p, new_p.eval())
 
-  def testGetLogitsAndProbProbabilityValidateArgs(self):
+  def testGetLogitsAndProbsProbabilityValidateArgs(self):
     p = [0.01, 0.2, 0.5, 0.7, .99]
     # Component less than 0.
     p2 = [-1, 0.2, 0.5, 0.3, .2]
@@ -179,26 +264,29 @@ class GetLogitsAndProbTest(test.TestCase):
     p3 = [2, 0.2, 0.5, 0.3, .2]
 
     with self.test_session():
-      _, prob = distribution_util.get_logits_and_prob(p=p, validate_args=True)
+      _, prob = distribution_util.get_logits_and_probs(
+          probs=p, validate_args=True)
       prob.eval()
 
       with self.assertRaisesOpError("Condition x >= 0"):
-        _, prob = distribution_util.get_logits_and_prob(
-            p=p2, validate_args=True)
+        _, prob = distribution_util.get_logits_and_probs(
+            probs=p2, validate_args=True)
         prob.eval()
 
-      _, prob = distribution_util.get_logits_and_prob(p=p2, validate_args=False)
+      _, prob = distribution_util.get_logits_and_probs(
+          probs=p2, validate_args=False)
       prob.eval()
 
-      with self.assertRaisesOpError("p has components greater than 1"):
-        _, prob = distribution_util.get_logits_and_prob(
-            p=p3, validate_args=True)
+      with self.assertRaisesOpError("probs has components greater than 1"):
+        _, prob = distribution_util.get_logits_and_probs(
+            probs=p3, validate_args=True)
         prob.eval()
 
-      _, prob = distribution_util.get_logits_and_prob(p=p3, validate_args=False)
+      _, prob = distribution_util.get_logits_and_probs(
+          probs=p3, validate_args=False)
       prob.eval()
 
-  def testGetLogitsAndProbProbabilityValidateArgsMultidimensional(self):
+  def testGetLogitsAndProbsProbabilityValidateArgsMultidimensional(self):
     p = np.array([[0.3, 0.4, 0.3], [0.1, 0.5, 0.4]], dtype=np.float32)
     # Component less than 0. Still sums to 1.
     p2 = np.array([[-.3, 0.4, 0.9], [0.1, 0.5, 0.4]], dtype=np.float32)
@@ -208,36 +296,36 @@ class GetLogitsAndProbTest(test.TestCase):
     p4 = np.array([[1.1, 0.3, 0.4], [0.1, 0.5, 0.4]], dtype=np.float32)
 
     with self.test_session():
-      _, prob = distribution_util.get_logits_and_prob(
-          p=p, multidimensional=True)
+      _, prob = distribution_util.get_logits_and_probs(
+          probs=p, multidimensional=True)
       prob.eval()
 
       with self.assertRaisesOpError("Condition x >= 0"):
-        _, prob = distribution_util.get_logits_and_prob(
-            p=p2, multidimensional=True, validate_args=True)
+        _, prob = distribution_util.get_logits_and_probs(
+            probs=p2, multidimensional=True, validate_args=True)
         prob.eval()
 
-      _, prob = distribution_util.get_logits_and_prob(
-          p=p2, multidimensional=True, validate_args=False)
+      _, prob = distribution_util.get_logits_and_probs(
+          probs=p2, multidimensional=True, validate_args=False)
       prob.eval()
 
       with self.assertRaisesOpError(
-          "(p has components greater than 1|p does not sum to 1)"):
-        _, prob = distribution_util.get_logits_and_prob(
-            p=p3, multidimensional=True, validate_args=True)
+          "(probs has components greater than 1|probs does not sum to 1)"):
+        _, prob = distribution_util.get_logits_and_probs(
+            probs=p3, multidimensional=True, validate_args=True)
         prob.eval()
 
-      _, prob = distribution_util.get_logits_and_prob(
-          p=p3, multidimensional=True, validate_args=False)
+      _, prob = distribution_util.get_logits_and_probs(
+          probs=p3, multidimensional=True, validate_args=False)
       prob.eval()
 
-      with self.assertRaisesOpError("p does not sum to 1"):
-        _, prob = distribution_util.get_logits_and_prob(
-            p=p4, multidimensional=True, validate_args=True)
+      with self.assertRaisesOpError("probs does not sum to 1"):
+        _, prob = distribution_util.get_logits_and_probs(
+            probs=p4, multidimensional=True, validate_args=True)
         prob.eval()
 
-      _, prob = distribution_util.get_logits_and_prob(
-          p=p4, multidimensional=True, validate_args=False)
+      _, prob = distribution_util.get_logits_and_probs(
+          probs=p4, multidimensional=True, validate_args=False)
       prob.eval()
 
 
@@ -478,6 +566,98 @@ class GenNewSeedTest(test.TestCase):
     self.assertFalse(distribution_util.gen_new_seed(0, "salt") is None)
     self.assertTrue(distribution_util.gen_new_seed(None, "salt") is None)
 
+
+# TODO(jvdillon): Merge this test back into:
+# tensorflow/python/kernel_tests/softplus_op_test.py
+# once TF core is accepting new ops.
+class SoftplusTest(test.TestCase):
+
+  def _npSoftplus(self, np_features):
+    np_features = np.asarray(np_features)
+    zero = np.asarray(0).astype(np_features.dtype)
+    return np.logaddexp(zero, np_features)
+
+  def _testSoftplus(self, np_features, use_gpu=False):
+    np_features = np.asarray(np_features)
+    np_softplus = self._npSoftplus(np_features)
+    with self.test_session(use_gpu=use_gpu) as sess:
+      softplus = nn_ops.softplus(np_features)
+      softplus_inverse = distribution_util.softplus_inverse(softplus)
+      [tf_softplus, tf_softplus_inverse] = sess.run([
+          softplus, softplus_inverse])
+    self.assertAllCloseAccordingToType(np_softplus, tf_softplus)
+    rtol = {"float16": 0.07, "float32": 0.003, "float64": 0.002}.get(
+        str(np_features.dtype), 1e-6)
+    # This will test that we correctly computed the inverse by verifying we
+    # recovered the original input.
+    self.assertAllCloseAccordingToType(
+        np_features, tf_softplus_inverse,
+        atol=0., rtol=rtol)
+    self.assertAllEqual(np.ones_like(tf_softplus).astype(np.bool),
+                        tf_softplus > 0)
+
+    self.assertShapeEqual(np_softplus, softplus)
+    self.assertShapeEqual(np_softplus, softplus_inverse)
+
+    self.assertAllEqual(np.ones_like(tf_softplus).astype(np.bool),
+                        np.isfinite(tf_softplus))
+    self.assertAllEqual(np.ones_like(tf_softplus_inverse).astype(np.bool),
+                        np.isfinite(tf_softplus_inverse))
+
+  def testNumbers(self):
+    for t in [np.float16, np.float32, np.float64]:
+      lower = {np.float16: -15, np.float32: -50, np.float64: -50}.get(t, -100)
+      upper = {np.float16: 50, np.float32: 50, np.float64: 50}.get(t, 100)
+      self._testSoftplus(
+          np.array(np.linspace(lower, upper, int(1e3)).astype(t)).reshape(
+              [2, -1]),
+          use_gpu=False)
+      self._testSoftplus(
+          np.array(np.linspace(lower, upper, int(1e3)).astype(t)).reshape(
+              [2, -1]),
+          use_gpu=True)
+      log_eps = np.log(np.finfo(t).eps)
+      one = t(1)
+      ten = t(10)
+      self._testSoftplus(
+          [
+              log_eps, log_eps - one, log_eps + one, log_eps - ten,
+              log_eps + ten, -log_eps, -log_eps - one, -log_eps + one,
+              -log_eps - ten, -log_eps + ten
+          ],
+          use_gpu=False)
+      self._testSoftplus(
+          [
+              log_eps, log_eps - one, log_eps + one, log_eps - ten,
+              log_eps + ten - log_eps, -log_eps - one, -log_eps + one,
+              -log_eps - ten, -log_eps + ten
+          ],
+          use_gpu=True)
+
+  def testGradient(self):
+    with self.test_session():
+      x = constant_op.constant(
+          [-0.9, -0.7, -0.5, -0.3, -0.1, 0.1, 0.3, 0.5, 0.7, 0.9],
+          shape=[2, 5],
+          name="x")
+      y = nn_ops.softplus(x, name="softplus")
+      x_init = np.asarray(
+          [[-0.9, -0.7, -0.5, -0.3, -0.1], [0.1, 0.3, 0.5, 0.7, 0.9]],
+          dtype=np.float32,
+          order="F")
+      err = gradient_checker.compute_gradient_error(
+          x, [2, 5], y, [2, 5], x_init_value=x_init)
+    logging.vlog(2, "softplus (float) gradient err = ", err)
+    self.assertLess(err, 1e-4)
+
+  def testInverseSoftplusGradientNeverNan(self):
+    with self.test_session():
+      # Note that this range contains both zero and inf.
+      x = constant_op.constant(np.logspace(-8, 6).astype(np.float16))
+      y = distribution_util.softplus_inverse(x)
+      grads = gradients_impl.gradients(y, x)[0].eval()
+      # Equivalent to `assertAllFalse` (if it existed).
+      self.assertAllEqual(np.zeros_like(grads).astype(np.bool), np.isnan(grads))
 
 if __name__ == "__main__":
   test.main()

@@ -36,7 +36,6 @@ from tensorflow.python.ops import partitioned_variables
 from tensorflow.python.ops import state_ops
 from tensorflow.python.ops import variable_scope
 from tensorflow.python.ops import variables
-import tensorflow.python.ops.data_flow_grad  # pylint: disable=unused-import
 from tensorflow.python.platform import test
 from tensorflow.python.platform import tf_logging
 from tensorflow.python.util import compat
@@ -162,16 +161,18 @@ def _EmbeddingParams(num_shards,
 def _EmbeddingParamsAsPartitionedVariable(num_shards,
                                           vocab_size,
                                           dtype=dtypes.float32,
-                                          shape=None):
+                                          shape=None,
+                                          use_resource=False):
   p, params, feed_dict = _EmbeddingParams(
       num_shards, vocab_size, dtype=dtype, shape=shape)
   shape = shape or [10]
   partitioned_variable = variable_scope.get_variable(
       "p",
       shape=[vocab_size] + shape,
-      initializer=array_ops.concat_v2([params[p_i.name] for p_i in p], 0),
+      initializer=array_ops.concat([params[p_i.name] for p_i in p], 0),
       partitioner=partitioned_variables.min_max_variable_partitioner(
-          max_partitions=num_shards, min_slice_size=1))
+          max_partitions=num_shards, min_slice_size=1),
+      use_resource=use_resource)
   return p, partitioned_variable, params, feed_dict
 
 
@@ -295,6 +296,29 @@ class EmbeddingLookupTest(test.TestCase):
       p_var_val = sess.run(list(p_variable))
       # Actual test
       tf_result = embedding.eval(feed_dict=feed_dict)
+    np_result, _, _ = _EmbeddingResult(params, id_vals, num_shards, vocab_size)
+    self.assertAllEqual(params_values, p_var_val)
+    self.assertAllEqual(np_result, tf_result)
+    self.assertShapeEqual(np_result, embedding)
+
+  def testSimpleShardedPartitionedResourceVariable(self):
+    with self.test_session() as sess:
+      num_shards = 2
+      vocab_size = 4
+      p, p_variable, params, _ = _EmbeddingParamsAsPartitionedVariable(
+          num_shards, vocab_size, use_resource=True)
+
+      id_vals = np.array([0, 0])
+      ids = constant_op.constant(list(id_vals), dtype=dtypes.int32)
+      print("Construct ids", ids.get_shape())
+      embedding = embedding_ops.embedding_lookup(p_variable, ids)
+      variables.global_variables_initializer().run()
+      params_values = [params[p_i.name] for p_i in p]
+      # Test that the PartitionedVariable components equal the list in p
+      p_var_val = sess.run(list(p_variable))
+      # Actual test
+      print(ops.get_default_graph().as_graph_def())
+      tf_result = embedding.eval()
     np_result, _, _ = _EmbeddingResult(params, id_vals, num_shards, vocab_size)
     self.assertAllEqual(params_values, p_var_val)
     self.assertAllEqual(np_result, tf_result)
@@ -521,6 +545,31 @@ class EmbeddingLookupTest(test.TestCase):
                 array_ops.gather(params, stride + p) for p in xrange(procs)
             ]
             sharded = embedding_ops.embedding_lookup(split_params, ids).eval()
+            self.assertAllEqual(simple, sharded)
+
+  def testHigherRankMaxNorm(self):
+    np.random.seed(8)
+    with self.test_session():
+      for params_shape in (12,), (6, 3):
+        params = 2 * np.ones(params_shape)
+        params_norm = params / np.sqrt(
+            np.sum(params*params, tuple(range(params.ndim)[1:]), keepdims=True))
+        for ids_shape in (), (3), (4, 3), (2, 3, 4):
+          ids = np.random.randint(
+              params.shape[0], size=np.prod(ids_shape, dtype=np.int64)).reshape(
+                  ids_shape)
+          # Compare nonsharded to gather
+          simple = embedding_ops.embedding_lookup(
+              params, ids, max_norm=1.0).eval()
+          self.assertAllEqual(simple, array_ops.gather(params_norm, ids).eval())
+          # Run a few random sharded versions
+          for procs in 1, 2, 3:
+            stride = procs * math_ops.range(params.shape[0] // procs)
+            split_params = [
+                array_ops.gather(params, stride + p) for p in xrange(procs)
+            ]
+            sharded = embedding_ops.embedding_lookup(
+                split_params, ids, max_norm=1.0).eval()
             self.assertAllEqual(simple, sharded)
 
 

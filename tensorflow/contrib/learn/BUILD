@@ -7,8 +7,10 @@ exports_files(["LICENSE"])
 
 package(default_visibility = [
     "//engedu/ml/tf_from_scratch:__pkg__",
-    "//tensorflow:__subpackages__",
+    "//tensorflow:internal",
 ])
+
+load("//tensorflow:tensorflow.bzl", "py_test")
 
 py_library(
     name = "learn",
@@ -32,10 +34,6 @@ py_library(
         "//tensorflow/contrib/rnn:rnn_py",
         "//tensorflow/contrib/session_bundle:exporter",
         "//tensorflow/contrib/session_bundle:gc",
-        "//tensorflow/contrib/tensor_forest:client_lib",
-        "//tensorflow/contrib/tensor_forest:data_ops_py",
-        "//tensorflow/contrib/tensor_forest:eval_metrics",
-        "//tensorflow/contrib/tensor_forest:tensor_forest_py",
         "//tensorflow/contrib/training:training_py",
         "//tensorflow/core:protos_all_py",
         "//tensorflow/python:array_ops",
@@ -68,6 +66,9 @@ py_library(
         "//tensorflow/python:util",
         "//tensorflow/python:variable_scope",
         "//tensorflow/python:variables",
+        "//tensorflow/python/estimator:estimator_py",
+        "//tensorflow/python/estimator:inputs",
+        "//tensorflow/python/feature_column:feature_column_py",
         "//tensorflow/python/saved_model:builder",
         "//tensorflow/python/saved_model:loader",
         "//tensorflow/python/saved_model:signature_constants",
@@ -76,6 +77,16 @@ py_library(
         "//third_party/py/numpy",
         "@six_archive//:six",
     ],
+)
+
+# Exposes constants without having to build the entire :learn target.
+py_library(
+    name = "estimator_constants_py",
+    srcs = [
+        "python/learn/estimators/constants.py",
+        "python/learn/estimators/prediction_key.py",
+    ],
+    srcs_version = "PY2AND3",
 )
 
 py_test(
@@ -467,6 +478,7 @@ py_test(
 
 py_test(
     name = "tensor_signature_test",
+    size = "small",
     srcs = ["python/learn/estimators/tensor_signature_test.py"],
     srcs_version = "PY2AND3",
     deps = [
@@ -484,6 +496,7 @@ py_test(
     size = "medium",
     srcs = ["python/learn/estimators/estimator_test.py"],
     srcs_version = "PY2AND3",
+    tags = ["manual"],
     deps = [
         ":learn",
         "//tensorflow/contrib/framework:framework_py",
@@ -508,6 +521,27 @@ py_test(
         "//tensorflow/python/saved_model:tag_constants",
         "//third_party/py/numpy",
         "@six_archive//:six",
+    ],
+)
+
+py_test(
+    name = "estimator_input_test",
+    size = "medium",
+    srcs = ["python/learn/estimators/estimator_input_test.py"],
+    srcs_version = "PY2AND3",
+    deps = [
+        ":learn",
+        "//tensorflow/contrib/framework:framework_py",
+        "//tensorflow/contrib/layers:layers_py",
+        "//tensorflow/contrib/learn/python/learn/datasets",
+        "//tensorflow/contrib/metrics:metrics_py",
+        "//tensorflow/python:array_ops",
+        "//tensorflow/python:client_testlib",
+        "//tensorflow/python:data_flow_ops",
+        "//tensorflow/python:framework_for_generated_wrappers",
+        "//tensorflow/python:math_ops",
+        "//tensorflow/python:training",
+        "//third_party/py/numpy",
     ],
 )
 
@@ -552,6 +586,7 @@ py_test(
         "//tensorflow/python:init_ops",
         "//tensorflow/python:math_ops",
         "//tensorflow/python:training",
+        "//tensorflow/python/ops/losses",
         "//third_party/py/numpy",
     ],
 )
@@ -570,6 +605,7 @@ py_test(
         "//tensorflow/python:framework_for_generated_wrappers",
         "//tensorflow/python:framework_test_lib",
         "//tensorflow/python:variables",
+        "//tensorflow/python/ops/losses",
         "//third_party/py/numpy",
         "@six_archive//:six",
     ],
@@ -631,7 +667,6 @@ py_test(
     size = "medium",
     srcs = ["python/learn/estimators/kmeans_test.py"],
     srcs_version = "PY2AND3",
-    tags = ["manual"],  # b/33965977
     deps = [
         ":learn",
         "//tensorflow/contrib/factorization:factorization_py",
@@ -674,24 +709,33 @@ py_test(
 )
 
 py_test(
-    name = "random_forest_test",
+    name = "dynamic_rnn_estimator_test",
     size = "medium",
-    srcs = ["python/learn/estimators/random_forest_test.py"],
+    srcs = ["python/learn/estimators/dynamic_rnn_estimator_test.py"],
     srcs_version = "PY2AND3",
     deps = [
         ":learn",
-        "//tensorflow/contrib/learn/python/learn/datasets",
-        "//tensorflow/contrib/tensor_forest:tensor_forest_py",
+        "//tensorflow/contrib/layers:layers_py",
+        "//tensorflow/contrib/rnn:rnn_py",
+        "//tensorflow/python:array_ops",
+        "//tensorflow/python:client",
         "//tensorflow/python:client_testlib",
+        "//tensorflow/python:data_flow_ops",
+        "//tensorflow/python:framework",
+        "//tensorflow/python:framework_for_generated_wrappers",
         "//tensorflow/python:framework_test_lib",
+        "//tensorflow/python:functional_ops",
+        "//tensorflow/python:math_ops",
+        "//tensorflow/python:random_ops",
+        "//tensorflow/python:variables",
         "//third_party/py/numpy",
     ],
 )
 
 py_test(
-    name = "dynamic_rnn_estimator_test",
+    name = "state_saving_rnn_estimator_test",
     size = "medium",
-    srcs = ["python/learn/estimators/dynamic_rnn_estimator_test.py"],
+    srcs = ["python/learn/estimators/state_saving_rnn_estimator_test.py"],
     srcs_version = "PY2AND3",
     deps = [
         ":learn",
@@ -718,6 +762,7 @@ py_test(
     srcs = ["python/learn/estimators/linear_test.py"],
     shard_count = 4,
     srcs_version = "PY2AND3",
+    tags = ["no_pip"],
     deps = [
         ":learn",
         "//tensorflow/contrib/layers:layers_py",
@@ -794,6 +839,19 @@ py_test(
 )
 
 py_test(
+    name = "model_fn_test",
+    size = "small",
+    srcs = ["python/learn/estimators/model_fn_test.py"],
+    srcs_version = "PY2AND3",
+    deps = [
+        ":learn",
+        "//tensorflow/python:client_testlib",
+        "//tensorflow/python:framework_test_lib",
+        "//third_party/py/numpy",
+    ],
+)
+
+py_test(
     name = "multioutput_test",
     size = "small",
     srcs = ["python/learn/estimators/multioutput_test.py"],
@@ -831,6 +889,22 @@ py_test(
         "//tensorflow/python:client_testlib",
         "//tensorflow/python:framework_test_lib",
         "//third_party/py/numpy",
+    ],
+)
+
+py_test(
+    name = "rnn_common_test",
+    size = "medium",
+    srcs = ["python/learn/estimators/rnn_common_test.py"],
+    srcs_version = "PY2AND3",
+    deps = [
+        ":learn",
+        "//tensorflow/python:array_ops",
+        "//tensorflow/python:client_testlib",
+        "//tensorflow/python:framework",
+        "//tensorflow/python:framework_for_generated_wrappers",
+        "//tensorflow/python:framework_test_lib",
+        "//tensorflow/python:math_ops",
     ],
 )
 
@@ -959,10 +1033,12 @@ py_test(
 py_test(
     name = "export_test",
     size = "small",
+    timeout = "moderate",
     srcs = ["python/learn/utils/export_test.py"],
     srcs_version = "PY2AND3",
     tags = [
         "manual",  # http://b/31032996
+        "notap",  # TODO(b/37950026): Test is flaky
     ],
     deps = [
         ":learn",
@@ -1036,12 +1112,12 @@ py_test(
 
 py_binary(
     name = "inspect_checkpoint",
-    srcs = [
-        "python/learn/utils/inspect_checkpoint.py",
-    ],
+    srcs = ["python/learn/utils/inspect_checkpoint.py"],
     srcs_version = "PY2AND3",
     deps = [
-        "//tensorflow:tensorflow_py",
+        "//tensorflow/contrib/framework:framework_py",
+        "//tensorflow/python",  # TODO(b/34059704): remove when fixed
+        "//tensorflow/python:platform",
     ],
 )
 

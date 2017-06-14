@@ -1,10 +1,12 @@
 # Prepare training and testing data.
 
-package(default_visibility = ["//tensorflow:__subpackages__"])
+package(default_visibility = ["//tensorflow:internal"])
 
 licenses(["notice"])  # Apache 2.0
 
 exports_files(["LICENSE"])
+
+load("//tensorflow:tensorflow.bzl", "py_test")
 
 filegroup(
     name = "data_csv",
@@ -33,13 +35,12 @@ py_library(
 
 py_binary(
     name = "produce_small_datasets",
-    srcs = [
-        "produce_small_datasets.py",
-    ],
+    srcs = ["produce_small_datasets.py"],
     srcs_version = "PY2AND3",
     deps = [
         ":datasets",
-        "//tensorflow:tensorflow_py",
+        "//tensorflow/python",  # TODO(b/34059704): remove when fixed
+        "//tensorflow/python:platform",
     ],
 )
 
