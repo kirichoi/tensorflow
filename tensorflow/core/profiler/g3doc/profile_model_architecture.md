@@ -1,9 +1,9 @@
-##Profile Model Architecture
+## Profile Model Architecture
 
 * [Profile Model Parameters](#profile-model-parameters)
 * [Profile Model Float Operations](#profile-model-float-operations)
 
-###Profile Model Parameters
+### Profile Model Parameters
 
 <b>Notes:</b>
 `VariableV2` operation type might contain variables created by TensorFlow
@@ -34,14 +34,14 @@ _TFProfRoot (--/930.58k params)
 # to write to file. The result is always returned as a proto buffer.
 param_stats = tf.profiler.profile(
     tf.get_default_graph(),
-    options=tf.contrib.tfprof.model_analyzer.
-        TRAINABLE_VARS_PARAMS_STAT_OPTIONS)
+    options=tf.profiler.ProfileOptionBuilder
+        .trainable_variables_parameter())
 sys.stdout.write('total_params: %d\n' % param_stats.total_parameters)
 ```
 
-###Profile Model Float Operations
+### Profile Model Float Operations
 
-####Caveats
+#### Caveats
 
 For an operation to have float operation statistics:
 
@@ -52,7 +52,7 @@ use the definition to calculate float operations. Contributes are welcome.
 to calculate the statistics. It is suggested to pass in `-run_meta_path` if
 shape is only known during runtime. tfprof can fill in the missing shape with
 the runtime shape information from RunMetadata.
-Hence, it is suggested to use `-account_displayed_name_only`
+Hence, it is suggested to use `-account_displayed_op_only`
 option so that you know the statistics are only for the operations printed out.
 
 * If no RunMetadata provided, tfprof count float_ops of each graph node once,
@@ -88,5 +88,5 @@ BiasAdd                  1.28k float_ops (0.00%, 0.00%)
 # You can also do that in Python API.
 tf.profiler.profile(
     tf.get_default_graph(),
-    options=tf.contrib.tfprof.model_analyzer.FLOAT_OPS_OPTIONS)
+    options=tf.profiler.ProfileOptionBuilder.float_operation())
 ```

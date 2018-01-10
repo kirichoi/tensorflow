@@ -15,7 +15,7 @@ as regressors and classifiers:
     Construct a neural network regression model.
 *   @{tf.estimator.DNNLinearCombinedClassifier}:
     Construct a neural network and linear combined classification model.
-*   @{tf.estimator.DNNRegressor}:
+*   @{tf.estimator.DNNLinearCombinedRegressor}:
     Construct a neural network and linear combined regression model.
 
 But what if none of `tf.estimator`'s predefined model types meets your needs?
@@ -44,7 +44,7 @@ feature columns, input functions, and `train()`/`evaluate()`/`predict()`
 operations. If you've never used tf.estimator before, or need a refresher,
 you should first review the following tutorials:
 
-*   @{$estimator$tf.estimator Quickstart}: Quick introduction to
+*   @{$get_started/estimator$tf.estimator Quickstart}: Quick introduction to
     training a neural network using tf.estimator.
 *   @{$wide$TensorFlow Linear Model Tutorial}: Introduction to
     feature columns, and an overview on building a linear classifier in
@@ -515,7 +515,7 @@ using `mean_squared_error()` (in bold):
   loss = tf.losses.mean_squared_error(labels, predictions)</strong>
   ...</code></pre>
 
-See the @{$python/contrib.losses$API guide} for a
+See the @{tf.losses$API guide} for a
 full list of loss functions and more details on supported arguments and usage.
 
 Supplementary metrics for evaluation can be added to an `eval_metric_ops` dict.
@@ -578,7 +578,12 @@ def model_fn(features, labels, mode, params):
 
   # Reshape output layer to 1-dim Tensor to return predictions
   predictions = tf.reshape(output_layer, [-1])
-  predictions_dict = {"ages": predictions}
+
+  # Provide an estimator spec for `ModeKeys.PREDICT`.
+  if mode == tf.estimator.ModeKeys.PREDICT:
+    return tf.estimator.EstimatorSpec(
+        mode=mode,
+        predictions={"ages": predictions})
 
   # Calculate loss using mean squared error
   loss = tf.losses.mean_squared_error(labels, predictions)
@@ -594,9 +599,9 @@ def model_fn(features, labels, mode, params):
   train_op = optimizer.minimize(
       loss=loss, global_step=tf.train.get_global_step())
 
+  # Provide an estimator spec for `ModeKeys.EVAL` and `ModeKeys.TRAIN` modes.
   return tf.estimator.EstimatorSpec(
       mode=mode,
-      predictions=predictions_dict,
       loss=loss,
       train_op=train_op,
       eval_metric_ops=eval_metric_ops)
@@ -689,5 +694,5 @@ For additional reference materials on building `Estimator`s, see the following
 sections of the API guides:
 
 *   @{$python/contrib.layers$Layers}
-*   @{$python/contrib.losses$Losses}
+*   @{tf.losses$Losses}
 *   @{$python/contrib.layers#optimization$Optimization}

@@ -4,6 +4,8 @@
 package(default_visibility = ["//visibility:private"])
 
 load("@bazel_tools//tools/build_defs/pkg:pkg.bzl", "pkg_tar")
+load("//tensorflow:tensorflow.bzl", "tf_binary_additional_srcs")
+load("//third_party/mkl:build_defs.bzl", "if_mkl")
 
 genrule(
     name = "libtensorflow_proto",
@@ -41,11 +43,22 @@ pkg_tar(
     # are resolved, otherwise these rules break when built
     # with Python 3.
     tags = ["manual"],
+    deps = [":common_deps"],
+)
+
+# Shared objects that all TensorFlow libraries depend on.
+pkg_tar(
+    name = "common_deps",
+    files = tf_binary_additional_srcs(),
+    tags = ["manual"],
 )
 
 pkg_tar(
     name = "cheaders",
-    files = ["//tensorflow/c:headers"],
+    files = [
+        "//tensorflow/c:headers",
+        "//tensorflow/c/eager:headers",
+    ],
     package_dir = "include/tensorflow/c",
     # Mark as "manual" till
     # https://github.com/bazelbuild/bazel/issues/2352
@@ -65,6 +78,7 @@ pkg_tar(
     # are resolved, otherwise these rules break when built
     # with Python 3.
     tags = ["manual"],
+    deps = [":common_deps"],
 )
 
 pkg_tar(
@@ -100,11 +114,15 @@ genrule(
         "@libxsmm_archive//:LICENSE",
         "@lmdb//:LICENSE",
         "@local_config_sycl//sycl:LICENSE.text",
+        "@nsync//:LICENSE",
         "@png_archive//:LICENSE",
-        "@protobuf//:LICENSE",
+        "@protobuf_archive//:LICENSE",
         "@snappy//:COPYING",
         "@zlib_archive//:zlib.h",
-    ],
+    ] + if_mkl([
+        "//third_party/mkl:LICENSE",
+        "@mkl//:LICENSE",
+    ]),
     outs = ["include/tensorflow/c/LICENSE"],
     cmd = "$(location :concat_licenses.sh) $(SRCS) >$@",
     tools = [":concat_licenses.sh"],
@@ -131,11 +149,15 @@ genrule(
         "@libxsmm_archive//:LICENSE",
         "@lmdb//:LICENSE",
         "@local_config_sycl//sycl:LICENSE.text",
+        "@nsync//:LICENSE",
         "@png_archive//:LICENSE",
-        "@protobuf//:LICENSE",
+        "@protobuf_archive//:LICENSE",
         "@snappy//:COPYING",
         "@zlib_archive//:zlib.h",
-    ],
+    ] + if_mkl([
+        "//third_party/mkl:LICENSE",
+        "@mkl//:LICENSE",
+    ]),
     outs = ["include/tensorflow/jni/LICENSE"],
     cmd = "$(location :concat_licenses.sh) $(SRCS) >$@",
     tools = [":concat_licenses.sh"],

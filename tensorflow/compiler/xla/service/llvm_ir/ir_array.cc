@@ -15,8 +15,8 @@ limitations under the License.
 
 #include "tensorflow/compiler/xla/service/llvm_ir/ir_array.h"
 
-#include "external/llvm/include/llvm/IR/Constants.h"
-#include "external/llvm/include/llvm/IR/Instructions.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/Instructions.h"
 #include "tensorflow/compiler/xla/layout_util.h"
 #include "tensorflow/compiler/xla/service/llvm_ir/llvm_util.h"
 #include "tensorflow/compiler/xla/shape_util.h"
@@ -39,7 +39,7 @@ IrArray::Index::Index(llvm::Value* linear, const Shape& shape,
       << "Shape " << ShapeUtil::HumanStringWithLayout(shape)
       << " should have a layout.";
   int64 divisor = 1;
-  for (int64 dimension : layout_.minor_to_major()) {
+  for (int64 dimension : LayoutUtil::MinorToMajor(layout_)) {
     int64 size_of_current_dimension = shape.dimensions(dimension);
     // Emit IR instructions that compute
     //   (linear_index / divisor) % current_dimension
@@ -229,9 +229,11 @@ llvm::Value* IrArray::EmitArrayElementAddress(
   }
 
   if (!is_implicit_broadcast && index.LinearValidOnShape(*shape_)) {
+    llvm::Module* module =
+        ir_builder->GetInsertBlock()->getParent()->getParent();
     return ir_builder->CreateInBoundsGEP(
         ir_builder->CreateBitCast(
-            base_ptr_, PrimitiveTypeToIrType(shape_->element_type(), ir_builder)
+            base_ptr_, PrimitiveTypeToIrType(shape_->element_type(), module)
                            ->getPointerTo()),
         {index.linear()}, llvm_ir::AsStringRef(name));
   }
@@ -242,12 +244,24 @@ llvm::Value* IrArray::EmitArrayElementAddress(
   //
   //   getelementptr base_ptr_, 0, most major index, ..., most minor index
   std::vector<llvm::Value*> gep_indices(1, ir_builder->getInt64(0));
-  for (int64 i = shape_->layout().minor_to_major_size() - 1; i >= 0; --i) {
-    int64 dimension = shape_->layout().minor_to_major(i);
+  for (int64 i = 0; i < LayoutUtil::MinorToMajor(*shape_).size(); ++i) {
+    int64 dimension = LayoutUtil::Major(shape_->layout(), i);
     gep_indices.push_back(actual_index[dimension]);
   }
   return ir_builder->CreateInBoundsGEP(base_ptr_, gep_indices,
                                        llvm_ir::AsStringRef(name));
+}
+
+void IrArray::AnnotateLoadStoreInstructionWithMetadata(
+    llvm::Instruction* instruction) const {
+  CHECK(llvm::isa<llvm::LoadInst>(instruction) ||
+        llvm::isa<llvm::StoreInst>(instruction));
+  CHECK(!llvm::isa<llvm::StoreInst>(instruction) || !is_invariant_)
+      << "Trying to create a store to an invariant IRArray.";
+
+  for (const auto& kind_md_pair : metadata_) {
+    instruction->setMetadata(kind_md_pair.first, kind_md_pair.second);
+  }
 }
 
 llvm::Value* IrArray::EmitReadArrayElement(const Index& index,
@@ -256,11 +270,7 @@ llvm::Value* IrArray::EmitReadArrayElement(const Index& index,
   llvm::Value* element_address =
       EmitArrayElementAddress(index, ir_builder, name);
   llvm::LoadInst* load = ir_builder->CreateLoad(element_address);
-  llvm_ir::SetTbaaForInstruction(load, GetShape(),
-                                 /*is_pointer_to=*/false);
-  for (const auto& kind_md_pair : metadata_) {
-    load->setMetadata(kind_md_pair.first, kind_md_pair.second);
-  }
+  AnnotateLoadStoreInstructionWithMetadata(load);
   return load;
 }
 
@@ -268,17 +278,13 @@ void IrArray::EmitWriteArrayElement(const Index& index, llvm::Value* value,
                                     llvm::IRBuilder<>* ir_builder) const {
   llvm::Value* element_address = EmitArrayElementAddress(index, ir_builder);
   llvm::StoreInst* store = ir_builder->CreateStore(value, element_address);
-  llvm_ir::SetTbaaForInstruction(store, GetShape(),
-                                 /*is_pointer_to=*/false);
-  for (const auto& kind_md_pair : metadata_) {
-    CHECK_NE(kind_md_pair.first, llvm::LLVMContext::MD_invariant_load);
-    store->setMetadata(kind_md_pair.first, kind_md_pair.second);
-  }
+  AnnotateLoadStoreInstructionWithMetadata(store);
 }
 
 IrArray IrArray::CastToShape(const Shape& new_shape,
                              llvm::IRBuilder<>* ir_builder) const {
-  llvm::Type* new_ir_type = llvm_ir::ShapeToIrType(new_shape, ir_builder);
+  llvm::Module* module = ir_builder->GetInsertBlock()->getParent()->getParent();
+  llvm::Type* new_ir_type = llvm_ir::ShapeToIrType(new_shape, module);
   return IrArray(
       ir_builder->CreatePointerCast(base_ptr_, new_ir_type->getPointerTo()),
       new_shape);

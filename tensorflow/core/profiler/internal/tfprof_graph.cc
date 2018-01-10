@@ -30,8 +30,8 @@ GraphNode* TFGraph::CreateParentNode(const string& name) {
   node_defs_.push_back(std::unique_ptr<NodeDef>(new NodeDef()));
   node_defs_.back()->set_name(name);
   node_defs_.back()->set_op(kTFGraphParent);
-  parent_nodes_[name] =
-      std::unique_ptr<TFGraphNode>(new TFGraphNode(node_defs_.back().get()));
+  parent_nodes_[name] = std::unique_ptr<TFGraphNode>(
+      new TFGraphNode(node_defs_.back().get(), -1, nullptr));
   nodes_map_[name] =
       std::unique_ptr<GraphNode>(new GraphNode(parent_nodes_[name].get()));
   return nodes_map_[name].get();
@@ -49,11 +49,11 @@ void TFGraph::Build() {
   // Filter out the root nodes (node not input of any other node).
   for (auto it = nodes_map_.begin(); it != nodes_map_.end(); it++) {
     GraphNode* node = it->second.get();
-    const std::map<int, TFGraphNode*>& inputs = node->node->inputs();
+    const std::map<int, string>& inputs = node->node->inputs();
     for (auto inputs_it = inputs.cbegin(); inputs_it != inputs.cend();
          inputs_it++) {
-      nonroots.insert(inputs_it->second->name());
-      auto child_it = nodes_map_.find(inputs_it->second->name());
+      nonroots.insert(inputs_it->second);
+      auto child_it = nodes_map_.find(inputs_it->second);
       if (child_it != nodes_map_.end()) {
         node->children.push_back(child_it->second.get());
       }
@@ -72,6 +72,11 @@ void TFGraph::Build() {
 const ShowNode* TFGraph::ShowInternal(const Options& opts, Timeline* timeline) {
   root_->ResetTotalStats();
   root_->show_children.clear();
+
+  if (opts.output_type == kOutput[3]) {
+    fprintf(stderr, "Only 'code' view supports pprof output now.\n");
+    return root_;
+  }
   if (timeline && timeline->step() < 0) {
     // TODO(xpan): Maybe pick a default step for users.
     fprintf(stderr,
@@ -94,7 +99,7 @@ const ShowNode* TFGraph::ShowInternal(const Options& opts, Timeline* timeline) {
   }
 
   // 3. Trim the nodes not matching show/hide/trim_name_regexes.
-  // If account_displayed_name_only=true, redo the accounting.
+  // If account_displayed_op_only=true, redo the accounting.
   visits.clear();
   root_->show_children.assign(roots.begin(), roots.end());
   GraphNode* root = PrintGraph({root_}, opts, 1, 0, &visits)[0];
@@ -141,10 +146,10 @@ std::vector<GraphNode*> TFGraph::SearchRoot(
 }
 
 void TFGraph::Format(const std::vector<GraphNode*> roots, string* display_str,
-                     TFGraphNodeProto* proto) {
+                     GraphNodeProto* proto) {
   for (GraphNode* node : roots) {
     display_str->append(node->formatted_str);
-    TFGraphNodeProto* child = proto->add_children();
+    GraphNodeProto* child = proto->add_children();
     child->MergeFrom(node->proto());
     Format(node->show_children, display_str, child);
   }

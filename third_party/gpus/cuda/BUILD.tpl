@@ -46,6 +46,7 @@ cc_library(
     includes = [
         ".",
         "cuda/include",
+        "cuda/include/crt",
     ],
     visibility = ["//visibility:public"],
 )
@@ -152,6 +153,7 @@ cc_library(
 
 cc_library(
     name = "cuda",
+    visibility = ["//visibility:public"],
     deps = [
         ":cublas",
         ":cuda_headers",
@@ -160,7 +162,6 @@ cc_library(
         ":cufft",
         ":curand",
     ],
-    visibility = ["//visibility:public"],
 )
 
 cc_library(

@@ -25,16 +25,16 @@ from __future__ import print_function
 
 import subprocess
 
-PIP_PACKAGE_QUERY = """bazel query \
-  'deps(//tensorflow/tools/pip_package:build_pip_package)'"""
+PIP_PACKAGE_QUERY_EXPRESSION = \
+  'deps(//tensorflow/tools/pip_package:build_pip_package)'
 
-PY_TEST_QUERY = """bazel query 'deps(\
+PY_TEST_QUERY_EXPRESSION = 'deps(\
   filter("^((?!benchmark).)*$",\
   kind(py_test,\
   //tensorflow/python/... \
   + //tensorflow/contrib/... \
   - //tensorflow/contrib/tensorboard/... \
-  - attr(tags, "manual|no_pip", //tensorflow/...))), 1)'"""
+  - attr(tags, "manual|no_pip", //tensorflow/...))), 1)'
 
 # Hard-coded blacklist of files if not included in pip package
 # TODO(amitpatankar): Clean up blacklist.
@@ -42,6 +42,7 @@ BLACKLIST = [
     "//tensorflow/python:extra_py_tests_deps",
     "//tensorflow/cc/saved_model:saved_model_half_plus_two",
     "//tensorflow:no_tensorflow_py_deps",
+    "//tensorflow/tools/pip_package:win_pip_package_marker",
     "//tensorflow/python:test_ops_2",
     "//tensorflow/python:tf_optimizer",
     "//tensorflow/python:compare_test_proto_py",
@@ -83,15 +84,15 @@ def main():
   """
 
   # pip_package_dependencies_list is the list of included files in pip packages
-  pip_package_dependencies = subprocess.check_output(
-      PIP_PACKAGE_QUERY, shell=True)
+  pip_package_dependencies = subprocess.check_output([
+      'bazel', 'query', PIP_PACKAGE_QUERY_EXPRESSION])
   pip_package_dependencies_list = pip_package_dependencies.strip().split("\n")
   print("Pip package superset size: %d" % len(pip_package_dependencies_list))
 
   # tf_py_test_dependencies is the list of dependencies for all python
   # tests in tensorflow
-  tf_py_test_dependencies = subprocess.check_output(
-      PY_TEST_QUERY, shell=True)
+  tf_py_test_dependencies = subprocess.check_output([
+      'bazel', 'query', PY_TEST_QUERY_EXPRESSION])
   tf_py_test_dependencies_list = tf_py_test_dependencies.strip().split("\n")
   print("Pytest dependency subset size: %d" % len(tf_py_test_dependencies_list))
 
@@ -112,11 +113,9 @@ def main():
 
       # Check if the dependency is in the pip package, the blacklist, or
       # should be ignored because of its file extension
-      if (ignore or
-          dependency in pip_package_dependencies_list or
-          dependency in BLACKLIST):
-        continue
-      else:
+      if not (ignore or
+              dependency in pip_package_dependencies_list or
+              dependency in BLACKLIST):
         missing_dependencies.append(dependency)
 
   print("Ignored files: %d" % ignored_files)
@@ -126,9 +125,9 @@ def main():
     for missing_dependency in missing_dependencies:
       print("\nMissing dependency: %s " % missing_dependency)
       print("Affected Tests:")
-      rdep_query = """bazel query 'rdeps(kind(py_test, \
-      //tensorflow/python/...), %s)'""" % missing_dependency
-      affected_tests = subprocess.check_output(rdep_query, shell=True)
+      rdep_query = 'rdeps(kind(py_test, \
+      //tensorflow/python/...), %s)' % missing_dependency
+      affected_tests = subprocess.check_output(['bazel', 'query', rdep_query])
       affected_tests_list = affected_tests.split("\n")[:-2]
       print("\n".join(affected_tests_list))
 

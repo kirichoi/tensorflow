@@ -35,7 +35,14 @@ bool NewProfiler(const string* graph, const string* op_log);
 
 void DeleteProfiler();
 
-void AddStep(int64 step, const string* run_meta, const string* op_log);
+double AddStep(int64 step, const string* graph, const string* run_meta,
+               const string* op_log);
+
+// Write the profiler's profile to a proto buffer.
+void WriteProfile(const string* filename);
+
+// Load the profile to profiler from a proto buffer file.
+void ProfilerFromFile(const string* filename);
 
 string Profile(const string* command, const string* options);
 
@@ -43,7 +50,7 @@ string Profile(const string* command, const string* options);
 //
 // Interface defined for Python API swig. Calls the tfprof core API.
 // 'graph', 'run_meta', 'op_log' are serialized GraphDef, RunMetadata,
-// OpLog strings, respectively.
+// OpLogProto strings, respectively.
 // 'graph', 'command' and 'options' are required. Others can be nullptr
 // if not available.
 string PrintModelAnalysis(const string* graph, const string* run_meta,

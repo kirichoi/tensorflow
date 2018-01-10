@@ -37,9 +37,14 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         "//tensorflow/core:protos_all_py",
+        "//tensorflow/python:framework_ops",
         "//tensorflow/python:lib",
         "//tensorflow/python:util",
+        "//tensorflow/python/saved_model:builder",
         "//tensorflow/python/saved_model:constants",
+        "//tensorflow/python/saved_model:signature_constants",
+        "//tensorflow/python/saved_model:signature_def_utils",
+        "//tensorflow/python/saved_model:tag_constants",
     ],
 )
 
