@@ -88,7 +88,6 @@ cc_library(
     visibility = [":friends"],
     deps = [
         "//tensorflow/core:framework_lite",
-        "//tensorflow/core:lib",
         "//third_party/eigen3",
     ],
 )
@@ -182,6 +181,7 @@ cc_library(
     deps = [
         ":status",
         ":status_macros",
+        ":statusor",
         ":types",
         ":xla_data_proto",
         "//tensorflow/core:lib",
@@ -260,6 +260,7 @@ tf_cc_test(
     srcs = ["shape_util_test.cc"],
     deps = [
         ":shape_util",
+        ":status_macros",
         ":test",
         ":test_helpers",
         ":types",
