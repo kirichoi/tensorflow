@@ -11,12 +11,14 @@ py_library(
     srcs_version = "PY2AND3",
     visibility = ["//visibility:public"],
     deps = [
+        ":checkpointable_utils",
         ":datasets",
         ":metrics",
         ":network",
         ":saver",
         "//tensorflow/python:framework_ops",
         "//tensorflow/python:framework_test_lib",
+        "//tensorflow/python:gradients",
         "//tensorflow/python:numerics",
         "//tensorflow/python:resource_variable_ops",
         "//tensorflow/python:script_ops",
@@ -26,7 +28,6 @@ py_library(
         "//tensorflow/python/eager:backprop",
         "//tensorflow/python/eager:context",
         "//tensorflow/python/eager:core",
-        "//tensorflow/python/eager:custom_gradient",
         "//tensorflow/python/eager:execution_callbacks",
         "//tensorflow/python/eager:function",
     ],
@@ -69,6 +70,8 @@ cuda_py_test(
     srcs = ["datasets_test.py"],
     additional_deps = [
         ":datasets",
+        ":checkpointable_utils",
+        "//tensorflow/contrib/data/python/ops:transformation_ops",
         "//tensorflow/contrib/lookup:lookup_py",
         "//tensorflow/python:dtypes",
         "//tensorflow/python:framework_ops",
@@ -115,6 +118,7 @@ py_library(
     srcs_version = "PY2AND3",
     visibility = ["//tensorflow:internal"],
     deps = [
+        "//tensorflow/contrib/eager/python:checkpointable_utils",
         "//tensorflow/contrib/summary:summary_ops",
         "//tensorflow/python:array_ops",
         "//tensorflow/python:control_flow_ops",
@@ -220,32 +224,36 @@ py_test(
 )
 
 py_library(
-    name = "checkpointable",
-    srcs = ["checkpointable.py"],
+    name = "checkpointable_utils",
+    srcs = ["checkpointable_utils.py"],
     srcs_version = "PY2AND3",
     visibility = ["//tensorflow:internal"],
     deps = [
         "//tensorflow/contrib/eager/proto:checkpointable_object_graph_proto_py",
+        "//tensorflow/python:constant_op",
+        "//tensorflow/python:control_flow_ops",
         "//tensorflow/python:dtypes",
+        "//tensorflow/python:errors",
         "//tensorflow/python:framework_ops",
         "//tensorflow/python:init_ops",
-        "//tensorflow/python:io_ops",
+        "//tensorflow/python:pywrap_tensorflow",
         "//tensorflow/python:resource_variable_ops",
-        "//tensorflow/python:state_ops",
+        "//tensorflow/python:session",
         "//tensorflow/python:tensor_shape",
         "//tensorflow/python:training",
+        "//tensorflow/python:util",
         "//tensorflow/python:variable_scope",
         "//tensorflow/python/eager:context",
     ],
 )
 
-py_test(
-    name = "checkpointable_test",
-    srcs = ["checkpointable_test.py"],
-    srcs_version = "PY2AND3",
-    deps = [
-        ":checkpointable",
+cuda_py_test(
+    name = "checkpointable_utils_test",
+    srcs = ["checkpointable_utils_test.py"],
+    additional_deps = [
+        ":checkpointable_utils",
         ":network",
+        "@six_archive//:six",
         "//tensorflow/python:constant_op",
         "//tensorflow/python:dtypes",
         "//tensorflow/python:framework_ops",
@@ -260,8 +268,9 @@ py_test(
         "//tensorflow/python:variables",
         "//tensorflow/python/eager:context",
         "//tensorflow/python/eager:test",
-        "@six_archive//:six",
+        "//tensorflow/python/keras",
     ],
+    tags = ["notsan"],
 )
 
 filegroup(

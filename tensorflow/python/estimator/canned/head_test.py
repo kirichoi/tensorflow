@@ -300,7 +300,12 @@ class MultiClassHeadWithSoftmaxCrossEntropyLoss(test.TestCase):
     features = {'x': values_2x3}
 
     # Static shape.
-    with self.assertRaisesRegexp(ValueError, 'Dimensions must be equal'):
+    with self.assertRaisesRegexp(
+        ValueError,
+        r'Shape mismatch: The shape of labels \(received \(3,\)\) should equal '
+        r'the shape of logits except for the last dimension '
+        r'\(received \(2, 3\)\)\.'
+    ):
       head.create_loss(
           features=features,
           mode=model_fn.ModeKeys.EVAL,
@@ -1554,11 +1559,13 @@ class BinaryLogisticHeadWithSigmoidCrossEntropyLossTest(test.TestCase):
         # loss_mean = loss/2 = 41./2 = 20.5
         keys.LOSS_MEAN: 20.5,
         keys.ACCURACY: 1./2,
+        keys.PRECISION: 1.,
+        keys.RECALL: 1./2,
         keys.PREDICTION_MEAN: 1./2,
         keys.LABEL_MEAN: 2./2,
         keys.ACCURACY_BASELINE: 2./2,
         keys.AUC: 0.,
-        keys.AUC_PR: 0.74999905,
+        keys.AUC_PR: 1.,
     }
 
     # Assert spec contains expected tensors.
@@ -1597,11 +1604,13 @@ class BinaryLogisticHeadWithSigmoidCrossEntropyLossTest(test.TestCase):
     expected_metric_keys = [
         '{}/some_binary_head'.format(metric_keys.MetricKeys.LOSS_MEAN),
         '{}/some_binary_head'.format(metric_keys.MetricKeys.ACCURACY),
+        '{}/some_binary_head'.format(metric_keys.MetricKeys.PRECISION),
+        '{}/some_binary_head'.format(metric_keys.MetricKeys.RECALL),
         '{}/some_binary_head'.format(metric_keys.MetricKeys.PREDICTION_MEAN),
         '{}/some_binary_head'.format(metric_keys.MetricKeys.LABEL_MEAN),
         '{}/some_binary_head'.format(metric_keys.MetricKeys.ACCURACY_BASELINE),
         '{}/some_binary_head'.format(metric_keys.MetricKeys.AUC),
-        '{}/some_binary_head'.format(metric_keys.MetricKeys.AUC_PR)
+        '{}/some_binary_head'.format(metric_keys.MetricKeys.AUC_PR),
     ]
     self.assertItemsEqual(expected_metric_keys, spec.eval_metric_ops.keys())
 
@@ -1632,11 +1641,13 @@ class BinaryLogisticHeadWithSigmoidCrossEntropyLossTest(test.TestCase):
         keys.LOSS_MEAN: expected_unregularized_loss,
         keys.LOSS_REGULARIZATION: expected_regularization_loss,
         keys.ACCURACY: 1./2,
+        keys.PRECISION: 1.,
+        keys.RECALL: 1./2,
         keys.PREDICTION_MEAN: 1./2,
         keys.LABEL_MEAN: 2./2,
         keys.ACCURACY_BASELINE: 2./2,
         keys.AUC: 0.,
-        keys.AUC_PR: 0.75,
+        keys.AUC_PR: 1.,
     }
 
     # Assert predictions, loss, and metrics.
@@ -1737,11 +1748,13 @@ class BinaryLogisticHeadWithSigmoidCrossEntropyLossTest(test.TestCase):
     expected_metrics = {
         keys.LOSS_MEAN: 1.62652338 / 2.,
         keys.ACCURACY: 1./2,
+        keys.PRECISION: 1.,
+        keys.RECALL: .5,
         keys.PREDICTION_MEAN: 1./2,
         keys.LABEL_MEAN: 2./2,
         keys.ACCURACY_BASELINE: 2./2,
         keys.AUC: 0.,
-        keys.AUC_PR: 0.74999905,
+        keys.AUC_PR: 1.,
         keys.ACCURACY_AT_THRESHOLD % thresholds[0]: 1.,
         keys.PRECISION_AT_THRESHOLD % thresholds[0]: 1.,
         keys.RECALL_AT_THRESHOLD % thresholds[0]: 1.,
@@ -2182,13 +2195,15 @@ class BinaryLogisticHeadWithSigmoidCrossEntropyLossTest(test.TestCase):
         keys.LOSS_MEAN: 26.9615384615,
         # accuracy = (1*1 + .1*0 + 1.5*0)/(1 + .1 + 1.5) = 1/2.6 = .38461538461
         keys.ACCURACY: .38461538461,
+        keys.PRECISION: 1./2.5,
+        keys.RECALL: 1./1.1,
         # prediction_mean = (1*1 + .1*0 + 1.5*1)/(1 + .1 + 1.5) = 2.5/2.6
         #                 = .96153846153
         keys.PREDICTION_MEAN: .96153846153,
         keys.LABEL_MEAN: expected_label_mean,
         keys.ACCURACY_BASELINE: 1 - expected_label_mean,
         keys.AUC: .45454565,
-        keys.AUC_PR: .21923049,
+        keys.AUC_PR: .6737757325172424,
     }
 
     # Assert spec contains expected tensors.
@@ -2481,13 +2496,15 @@ class BinaryLogisticHeadWithSigmoidCrossEntropyLossTest(test.TestCase):
     expected_metrics = {
         keys.LOSS_MEAN: expected_loss / np.sum(weights),
         keys.ACCURACY: (1.*0. + 1.5*1. + 2.*1. + 2.5*0.) / np.sum(weights),
+        keys.PRECISION: 2.0/3.0,
+        keys.RECALL: 2.0/4.5,
         keys.PREDICTION_MEAN: (1.*1 + 1.5*0 + 2.*1 + 2.5*0) / np.sum(weights),
         keys.LABEL_MEAN: (1.*0 + 1.5*0 + 2.*1 + 2.5*1) / np.sum(weights),
         keys.ACCURACY_BASELINE: (1.*0 + 1.5*0 + 2.*1 + 2.5*1) / np.sum(weights),
         # We cannot reliably calculate AUC with only 4 data points, but the
         # values should not change because of backwards-compatibility.
         keys.AUC: 0.5222,
-        keys.AUC_PR: 0.5119,
+        keys.AUC_PR: 0.7341,
     }
 
     tol = 1e-2
@@ -2703,10 +2720,9 @@ class RegressionHeadWithMeanSquaredErrorLossTest(test.TestCase):
     self.assertIsNone(spec.loss)
     self.assertEqual({}, spec.eval_metric_ops)
     self.assertIsNone(spec.train_op)
+    default_serving_key = signature_constants.DEFAULT_SERVING_SIGNATURE_DEF_KEY
     self.assertItemsEqual(
-        (signature_constants.DEFAULT_SERVING_SIGNATURE_DEF_KEY,
-         'predict',
-         'regression'),
+        (default_serving_key, 'predict', 'regression'),
         spec.export_outputs.keys())
     _assert_no_hooks(self, spec)
 
@@ -2714,6 +2730,54 @@ class RegressionHeadWithMeanSquaredErrorLossTest(test.TestCase):
     with self.test_session():
       _initialize_variables(self, spec.scaffold)
       self.assertAllClose(logits, spec.predictions[prediction_key].eval())
+      self.assertAllClose(
+          logits, spec.export_outputs[default_serving_key].value.eval())
+      self.assertAllClose(
+          logits, spec.export_outputs['regression'].value.eval())
+      self.assertAllClose(
+          logits, spec.export_outputs['predict'].outputs['predictions'].eval())
+
+  def test_predict_with_inverse_link_fn(self):
+    def _inverse_link_fn(logits):
+      return logits - 10.
+    head = head_lib._regression_head_with_mean_squared_error_loss(
+        inverse_link_fn=_inverse_link_fn)
+
+    # Create estimator spec.
+    logits = np.array(((45,), (41,),), dtype=np.int32)
+    expected_predictions = np.array(((35,), (31,),), dtype=np.int32)
+    spec = head.create_estimator_spec(
+        features={'x': np.array(((42.,),), dtype=np.int32)},
+        mode=model_fn.ModeKeys.PREDICT,
+        logits=logits)
+
+    # Assert spec contains expected tensors.
+    keys = prediction_keys.PredictionKeys
+    self.assertItemsEqual(
+        (keys.PREDICTIONS, keys.LOGITS), spec.predictions.keys())
+    self.assertEqual(dtypes.float32, spec.predictions[keys.PREDICTIONS].dtype)
+    self.assertEqual(dtypes.float32, spec.predictions[keys.LOGITS].dtype)
+    default_serving_key = signature_constants.DEFAULT_SERVING_SIGNATURE_DEF_KEY
+    self.assertItemsEqual(
+        (default_serving_key, 'predict', 'regression'),
+        spec.export_outputs.keys())
+
+    # Assert predictions.
+    with self.test_session():
+      _initialize_variables(self, spec.scaffold)
+      self.assertAllClose(
+          expected_predictions, spec.predictions[keys.PREDICTIONS].eval())
+      self.assertAllClose(logits, spec.predictions[keys.LOGITS].eval())
+      self.assertAllClose(
+          expected_predictions,
+          spec.export_outputs[default_serving_key].value.eval())
+      self.assertAllClose(
+          expected_predictions, spec.export_outputs['regression'].value.eval())
+      self.assertAllClose(
+          expected_predictions,
+          spec.export_outputs['predict'].outputs['predictions'].eval())
+      self.assertAllClose(
+          logits, spec.export_outputs['predict'].outputs['logits'].eval())
 
   def test_eval_create_loss(self):
     head = head_lib._regression_head_with_mean_squared_error_loss()

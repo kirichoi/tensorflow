@@ -498,7 +498,7 @@ class StridedSliceTest(test_util.TensorFlowTestCase):
 
   def test_basic_slice(self):
     for tensor_type in STRIDED_SLICE_TYPES:
-      with self.test_session(use_gpu=True):
+      with self.test_session(use_gpu=not tensor_type.is_integer):
         checker = StridedSliceChecker(
             self, StridedSliceChecker.REF_TENSOR, tensor_type=tensor_type)
         _ = checker[:, :, :]
@@ -884,7 +884,8 @@ class StridedSliceAssignChecker(object):
     if self.tensor_type.is_complex:
       value -= 1j * value
 
-    with self.test.test_session(use_gpu=True) as sess:
+    with self.test.test_session(
+        use_gpu=not self.tensor_type.is_integer) as sess:
       if self._use_resource:
         var = resource_variable_ops.ResourceVariable(self.x)
       else:
@@ -974,9 +975,7 @@ class SliceAssignTest(test_util.TensorFlowTestCase):
           errors.InvalidArgumentError,
           "l-value dtype int32 does not match r-value dtype int64"):
         sess.run(v[:].assign(too_large_val))
-      with self.assertRaisesRegexp(
-          errors.InvalidArgumentError,
-          "l-value dtype int32 does not match r-value dtype int8"):
+      with self.assertRaises(errors.InvalidArgumentError):
         sess.run(v[:].assign(too_small_val))
 
 
@@ -1025,6 +1024,7 @@ class SequenceMaskTest(test_util.TensorFlowTestCase):
           [[True, False, False, False, False], [True, True, True, False, False],
            [True, True, False, False, False]])
 
+  @test_util.enable_c_shapes
   def testOneDimensionalDtypeWithoutMaxlen(self):
     with self.test_session():
       # test dtype and default maxlen:
@@ -1038,6 +1038,7 @@ class SequenceMaskTest(test_util.TensorFlowTestCase):
           res.eval(),
           [[0.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0]])
 
+  @test_util.enable_c_shapes
   def testOneDimensionalWithoutMaxlen(self):
     with self.test_session():
       res = array_ops.sequence_mask(
@@ -1052,6 +1053,7 @@ class SequenceMaskTest(test_util.TensorFlowTestCase):
            [True, False, False, False],
            [True, True, True, True]])
 
+  @test_util.enable_c_shapes
   def testTwoDimensional(self):
     with self.test_session():
       res = array_ops.sequence_mask(constant_op.constant([[1, 3, 2]]), 5)
@@ -1224,7 +1226,7 @@ class SnapshotOpTest(test_util.TensorFlowTestCase):
     for dtype in [dtypes.int32, dtypes.int64, dtypes.float32, dtypes.float64]:
       with self.test_session(use_gpu=True):
         x = constant_op.constant([0, 1, 2, 3], dtype=dtype)
-        y = gen_array_ops._snapshot(x)
+        y = gen_array_ops.snapshot(x)
         self.assertAllEqual(y.eval(), [0, 1, 2, 3])
 
 

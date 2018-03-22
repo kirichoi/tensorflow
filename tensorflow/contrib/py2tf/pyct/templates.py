@@ -68,12 +68,27 @@ class ReplaceTransformer(gast.NodeTransformer):
     if isinstance(node, gast.Attribute):
       self._set_inner_child_context(node.value, ctx)
       node.ctx = gast.Load()
+    elif isinstance(node, gast.Tuple):
+      for e in node.elts:
+        self._set_inner_child_context(e, ctx)
+      node.ctx = ctx
     elif isinstance(node, gast.Name):
       node.ctx = ctx
     elif isinstance(node, (gast.Str, gast.Num)):
       pass
     else:
       raise ValueError('unexpected node type "%s"' % node)
+
+  def visit_Attribute(self, node):
+    node = self.generic_visit(node)
+    if node.attr not in self.replacements:
+      return node
+    repl = self.replacements[node.attr]
+    if not isinstance(repl, gast.Name):
+      raise ValueError(
+          'An attribute can only be replaced by a Name node. Found: %s' % repl)
+    node.attr = repl.id
+    return node
 
   def visit_Name(self, node):
     if node.id not in self.replacements:
@@ -150,3 +165,17 @@ def replace(template, **replacements):
   if isinstance(results, list):
     return [qual_names.resolve(r) for r in results]
   return qual_names.resolve(results)
+
+
+def replace_as_expression(template, **replacements):
+  """Variant of replace that generates expressions, instead of code blocks."""
+  replacement = replace(template, **replacements)
+  if len(replacement) != 1:
+    raise ValueError(
+        'single expression expected; for more general templates use replace')
+  node = replacement[0]
+  if not isinstance(node, gast.Expr):
+    raise ValueError(
+        'the template is expected to generate an expression node; instead '
+        'found %s' % node)
+  return node.value

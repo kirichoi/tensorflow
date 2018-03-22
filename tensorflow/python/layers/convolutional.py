@@ -1096,10 +1096,10 @@ class SeparableConv1D(_SeparableConv):
 
   def call(self, inputs):
     if self.data_format == 'channels_last':
-      strides = (1, 1) + self.strides + (1,)
+      strides = (1,) + self.strides * 2 + (1,)
       spatial_start_dim = 1
     else:
-      strides = (1, 1, 1) + self.strides
+      strides = (1, 1) + self.strides * 2
       spatial_start_dim = 2
 
     # Explicitly broadcast inputs and kernels to 4D.
@@ -1664,7 +1664,7 @@ class Conv2DTranspose(Conv2D):
         padding=self.padding.upper(),
         data_format=utils.convert_data_format(self.data_format, ndim=4))
 
-    if context.in_graph_mode():
+    if not context.executing_eagerly():
       # Infer the static output shape:
       out_shape = inputs.get_shape().as_list()
       out_shape[c_axis] = self.filters
@@ -1969,7 +1969,7 @@ class Conv3DTranspose(Conv3D):
         data_format=utils.convert_data_format(self.data_format, ndim=5),
         padding=self.padding.upper())
 
-    if context.in_graph_mode():
+    if not context.executing_eagerly():
       # Infer the static output shape:
       out_shape = inputs.get_shape().as_list()
       out_shape[c_axis] = self.filters

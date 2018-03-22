@@ -55,9 +55,9 @@ from tensorflow.python.ops import tensor_array_grad  # pylint: disable=unused-im
 from tensorflow.python.ops import tensor_array_ops
 from tensorflow.python.ops import variables as variables_module
 from tensorflow.python.training import moving_averages
+from tensorflow.python.util import tf_contextlib
 from tensorflow.python.util import tf_inspect
 from tensorflow.python.util.tf_export import tf_export
-
 
 py_all = all
 py_sum = sum
@@ -258,7 +258,7 @@ def set_image_data_format(data_format):
   """
   global _IMAGE_DATA_FORMAT
   if data_format not in {'channels_last', 'channels_first'}:
-    raise ValueError('Unknown data_format:', data_format)
+    raise ValueError('Unknown data_format: ' + str(data_format))
   _IMAGE_DATA_FORMAT = str(data_format)
 
 
@@ -342,11 +342,8 @@ def learning_phase():
 
   Returns:
       Learning phase (scalar integer tensor or Python integer).
-
-  Raises:
-      ValueError: If called when Eager execution is enabled.
   """
-  if context.in_eager_mode():
+  if context.executing_eagerly():
     if 'eager' not in _GRAPH_LEARNING_PHASES:
       # Fallback to inference mode as default.
       return 0
@@ -372,11 +369,40 @@ def set_learning_phase(value):
   """
   global _GRAPH_LEARNING_PHASES  # pylint: disable=global-variable-not-assigned
   if value not in {0, 1}:
-    raise ValueError('Expected learning phase to be ' '0 or 1.')
-  if context.in_eager_mode():
+    raise ValueError('Expected learning phase to be 0 or 1.')
+  if context.executing_eagerly():
     _GRAPH_LEARNING_PHASES['eager'] = value
   else:
     _GRAPH_LEARNING_PHASES[ops.get_default_graph()] = value
+
+
+@tf_contextlib.contextmanager
+def learning_phase_scope(value):
+  """Provides a scope within which the learning phase is equal to `value`.
+
+  The learning phase gets restored to its original value upon exiting the scope.
+
+  Arguments:
+     value: Learning phase value, either 0 or 1 (integers).
+
+  Yields:
+    The provided value.
+
+  Raises:
+     ValueError: if `value` is neither `0` nor `1`.
+  """
+  if value not in {0, 1}:
+    raise ValueError('Expected learning phase to be 0 or 1.')
+  previous_value = learning_phase()
+  try:
+    set_learning_phase(value)
+    yield value
+  finally:
+    # Restore learning phase to initial value.
+    if context.executing_eagerly():
+      _GRAPH_LEARNING_PHASES['eager'] = previous_value
+    else:
+      _GRAPH_LEARNING_PHASES[ops.get_default_graph()] = previous_value
 
 
 @tf_export('keras.backend.get_session')
@@ -397,8 +423,9 @@ def get_session():
       A TensorFlow session.
   """
   global _SESSION
-  if ops.get_default_session() is not None:
-    session = ops.get_default_session()
+  default_session = ops.get_default_session()
+  if default_session is not None:
+    session = default_session
   else:
     if _SESSION is None:
       if not os.environ.get('OMP_NUM_THREADS'):
@@ -469,7 +496,7 @@ def _is_current_explicit_device(device_type):
   """
   device_type = device_type.upper()
   if device_type not in ['CPU', 'GPU']:
-    raise ValueError('device_type should be either "CPU" or "GPU".')
+    raise ValueError('`device_type` should be either "CPU" or "GPU".')
   device = _get_current_tf_device()
   return device is not None and device.device_type == device_type.upper()
 
@@ -489,7 +516,7 @@ def _get_available_gpus():
 def _has_nchw_support():
   """Check whether the current scope supports NCHW ops.
 
-  Tensorflow does not support NCHW on CPU. Therefore we check if we are not
+  TensorFlow does not support NCHW on CPU. Therefore we check if we are not
   explicitly put on
   CPU, and have GPUs available. In this case there will be soft-placing on the
   GPU device.
@@ -2233,7 +2260,7 @@ def resize_images(x, height_factor, width_factor, data_format):
                  if original_shape[2] is not None else None, None))
     return x
   else:
-    raise ValueError('Invalid data_format:', data_format)
+    raise ValueError('Invalid data_format: ' + str(data_format))
 
 
 @tf_export('keras.backend.resize_volumes')
@@ -2265,7 +2292,7 @@ def resize_volumes(x, depth_factor, height_factor, width_factor, data_format):
     output = repeat_elements(output, width_factor, axis=3)
     return output
   else:
-    raise ValueError('Invalid data_format:', data_format)
+    raise ValueError('Invalid data_format: ' + str(data_format))
 
 
 @tf_export('keras.backend.repeat_elements')
@@ -2347,7 +2374,7 @@ def arange(start, stop=None, step=1, dtype='int32'):
 
   The function arguments use the same convention as
   Theano's arange: if only one argument is provided,
-  it is in fact the "stop" argument.
+  it is in fact the "stop" argument and "start" is 0.
 
   The default type of the returned tensor is `'int32'` to
   match TensorFlow's default.
@@ -2362,7 +2389,7 @@ def arange(start, stop=None, step=1, dtype='int32'):
       An integer tensor.
 
   """
-  # Match the behavior of numpy and Theano by returning an empty seqence.
+  # Match the behavior of numpy and Theano by returning an empty sequence.
   if stop is None and start < 0:
     start = 0
   result = math_ops.range(start, limit=stop, delta=step, name='arange')
@@ -2483,7 +2510,7 @@ def spatial_2d_padding(x, padding=((1, 1), (1, 1)), data_format=None):
   if data_format is None:
     data_format = image_data_format()
   if data_format not in {'channels_first', 'channels_last'}:
-    raise ValueError('Unknown data_format ' + str(data_format))
+    raise ValueError('Unknown data_format: ' + str(data_format))
 
   if data_format == 'channels_first':
     pattern = [[0, 0], [0, 0], list(padding[0]), list(padding[1])]
@@ -2524,7 +2551,7 @@ def spatial_3d_padding(x, padding=((1, 1), (1, 1), (1, 1)), data_format=None):
   if data_format is None:
     data_format = image_data_format()
   if data_format not in {'channels_first', 'channels_last'}:
-    raise ValueError('Unknown data_format ' + str(data_format))
+    raise ValueError('Unknown data_format: ' + str(data_format))
 
   if data_format == 'channels_first':
     pattern = [[0, 0], [0, 0], [padding[0][0], padding[0][1]],
@@ -2599,7 +2626,7 @@ def get_value(x):
   Returns:
       A Numpy array.
   """
-  if context.in_eager_mode():
+  if context.executing_eagerly():
     return x.numpy()
   return x.eval(session=get_session())
 
@@ -2614,7 +2641,7 @@ def batch_get_value(tensors):
   Returns:
       A list of Numpy arrays.
   """
-  if context.in_eager_mode():
+  if context.executing_eagerly():
     return [x.numpy() for x in tensors]
   if tensors:
     return get_session().run(tensors)
@@ -2632,7 +2659,7 @@ def set_value(x, value):
           (of the same shape).
   """
   value = np.asarray(value, dtype=dtype(x))
-  if context.in_eager_mode():
+  if context.executing_eagerly():
     x.assign(value)
   else:
     tf_dtype = dtypes_module.as_dtype(x.dtype.name.split('_')[0])
@@ -2655,7 +2682,7 @@ def batch_set_value(tuples):
       tuples: a list of tuples `(tensor, value)`.
           `value` should be a Numpy array.
   """
-  if context.in_eager_mode():
+  if context.executing_eagerly():
     for x, value in tuples:
       x.assign(np.asarray(value, dtype=dtype(x)))
   else:
@@ -2752,7 +2779,7 @@ class Function(object):
       self.updates_op = control_flow_ops.group(*updates_ops)
     self.name = name
     # additional tensor substitutions
-    self.feed_dict = session_kwargs.pop('feed_dict', {})
+    self.feed_dict = session_kwargs.pop('feed_dict', None)
     # additional operations
     self.fetches = session_kwargs.pop('fetches', [])
     if not isinstance(self.fetches, list):
@@ -2762,8 +2789,15 @@ class Function(object):
   def __call__(self, inputs):
     if not isinstance(inputs, (list, tuple)):
       raise TypeError('`inputs` should be a list or tuple.')
-    feed_dict = self.feed_dict.copy()
+
+    if self.feed_dict:
+      feed_dict = self.feed_dict.copy()
+    else:
+      feed_dict = {}
+
     for tensor, value in zip(self.inputs, inputs):
+      if value is None:
+        continue
       if is_sparse(tensor):
         sparse_coo = value.tocoo()
         indices = np.concatenate((np.expand_dims(sparse_coo.row, 1),
@@ -2797,7 +2831,7 @@ def function(inputs, outputs, updates=None, **kwargs):
     for key in kwargs:
       if (key not in tf_inspect.getargspec(session_module.Session.run)[0] and
           key not in tf_inspect.getargspec(Function.__init__)[0]):
-        msg = ('Invalid argument "%s" passed to K.function with Tensorflow '
+        msg = ('Invalid argument "%s" passed to K.function with TensorFlow '
                'backend') % key
         raise ValueError(msg)
   return Function(inputs, outputs, updates=updates, **kwargs)
@@ -2917,7 +2951,7 @@ def rnn(step_function,
 
   if unroll:
     if not inputs.get_shape()[0]:
-      raise ValueError('Unrolling requires a ' 'fixed number of timesteps.')
+      raise ValueError('Unrolling requires a fixed number of timesteps.')
     states = initial_states
     successive_states = []
     successive_outputs = []
@@ -3090,7 +3124,8 @@ def rnn(step_function,
   outputs_shape[1] = inputs_shape[1]
   outputs.set_shape(outputs_shape)
 
-  last_output._uses_learning_phase = uses_learning_phase
+  if not context.executing_eagerly():
+    last_output._uses_learning_phase = uses_learning_phase
   return last_output, outputs, new_states
 
 
@@ -3338,7 +3373,7 @@ def categorical_crossentropy(target, output, from_logits=False):
         target * math_ops.log(output),
         axis=len(output.get_shape()) - 1)
   else:
-    return nn.softmax_cross_entropy_with_logits(labels=target, logits=output)
+    return nn.softmax_cross_entropy_with_logits_v2(labels=target, logits=output)
 
 
 @tf_export('keras.backend.sparse_categorical_crossentropy')
@@ -3480,7 +3515,7 @@ def l2_normalize(x, axis=None):
   Returns:
       A tensor.
   """
-  return nn.l2_normalize(x, dim=axis)
+  return nn.l2_normalize(x, axis=axis)
 
 
 @tf_export('keras.backend.in_top_k')
@@ -3561,7 +3596,7 @@ def _preprocess_conv3d_input(x, data_format):
 
 
 def _preprocess_padding(padding):
-  """Convert keras' padding to tensorflow's padding.
+  """Convert keras' padding to TensorFlow's padding.
 
   Arguments:
       padding: string, one of 'same' , 'valid'
@@ -3577,7 +3612,7 @@ def _preprocess_padding(padding):
   elif padding == 'valid':
     padding = 'VALID'
   else:
-    raise ValueError('Invalid padding:', padding)
+    raise ValueError('Invalid padding: ' + str(padding))
   return padding
 
 
@@ -3608,7 +3643,7 @@ def conv1d(x,
   if data_format is None:
     data_format = image_data_format()
   if data_format not in {'channels_first', 'channels_last'}:
-    raise ValueError('Unknown data_format ' + str(data_format))
+    raise ValueError('Unknown data_format: ' + str(data_format))
 
   kernel_shape = kernel.get_shape().as_list()
   if padding == 'causal':
@@ -3660,7 +3695,7 @@ def conv2d(x,
   if data_format is None:
     data_format = image_data_format()
   if data_format not in {'channels_first', 'channels_last'}:
-    raise ValueError('Unknown data_format ' + str(data_format))
+    raise ValueError('Unknown data_format: ' + str(data_format))
 
   x, tf_data_format = _preprocess_conv2d_input(x, data_format)
   padding = _preprocess_padding(padding)
@@ -3707,7 +3742,7 @@ def conv2d_transpose(x,
   if data_format is None:
     data_format = image_data_format()
   if data_format not in {'channels_first', 'channels_last'}:
-    raise ValueError('Unknown data_format ' + str(data_format))
+    raise ValueError('Unknown data_format: ' + str(data_format))
   if isinstance(output_shape, (tuple, list)):
     output_shape = array_ops.stack(output_shape)
 
@@ -3766,16 +3801,18 @@ def separable_conv1d(x,
   if data_format is None:
     data_format = image_data_format()
   if data_format not in {'channels_first', 'channels_last'}:
-    raise ValueError('Unknown data_format ' + str(data_format))
+    raise ValueError('Unknown data_format: ' + str(data_format))
 
   x, tf_data_format = _preprocess_conv1d_input(x, data_format)
   padding = _preprocess_padding(padding)
+  if not isinstance(strides, tuple):
+    strides = tuple(strides)
   if tf_data_format == 'NHWC':
     spatial_start_dim = 1
-    strides = (1, 1) + strides + (1,)
+    strides = (1,) + strides * 2 + (1,)
   else:
     spatial_start_dim = 2
-    strides = (1, 1, 1) + strides
+    strides = (1, 1) + strides * 2
   x = array_ops.expand_dims(x, spatial_start_dim)
   depthwise_kernel = array_ops.expand_dims(depthwise_kernel, 0)
   pointwise_kernel = array_ops.expand_dims(pointwise_kernel, 0)
@@ -3828,10 +3865,12 @@ def separable_conv2d(x,
   if data_format is None:
     data_format = image_data_format()
   if data_format not in {'channels_first', 'channels_last'}:
-    raise ValueError('Unknown data_format ' + str(data_format))
+    raise ValueError('Unknown data_format: ' + str(data_format))
 
   x, tf_data_format = _preprocess_conv2d_input(x, data_format)
   padding = _preprocess_padding(padding)
+  if not isinstance(strides, tuple):
+    strides = tuple(strides)
   if tf_data_format == 'NHWC':
     strides = (1,) + strides + (1,)
   else:
@@ -3877,7 +3916,7 @@ def depthwise_conv2d(x,
   if data_format is None:
     data_format = image_data_format()
   if data_format not in {'channels_first', 'channels_last'}:
-    raise ValueError('Unknown data_format ' + str(data_format))
+    raise ValueError('Unknown data_format: ' + str(data_format))
 
   x, tf_data_format = _preprocess_conv2d_input(x, data_format)
   padding = _preprocess_padding(padding)
@@ -3927,7 +3966,7 @@ def conv3d(x,
   if data_format is None:
     data_format = image_data_format()
   if data_format not in {'channels_first', 'channels_last'}:
-    raise ValueError('Unknown data_format ' + str(data_format))
+    raise ValueError('Unknown data_format: ' + str(data_format))
 
   x, tf_data_format = _preprocess_conv3d_input(x, data_format)
   padding = _preprocess_padding(padding)
@@ -3973,7 +4012,7 @@ def conv3d_transpose(x,
   if data_format is None:
     data_format = image_data_format()
   if data_format not in {'channels_first', 'channels_last'}:
-    raise ValueError('Unknown data_format ' + str(data_format))
+    raise ValueError('Unknown data_format: ' + str(data_format))
   if isinstance(output_shape, (tuple, list)):
     output_shape = array_ops.stack(output_shape)
 
@@ -4032,7 +4071,7 @@ def pool2d(x,
   if data_format is None:
     data_format = image_data_format()
   if data_format not in {'channels_first', 'channels_last'}:
-    raise ValueError('Unknown data_format ' + str(data_format))
+    raise ValueError('Unknown data_format: ' + str(data_format))
 
   x, tf_data_format = _preprocess_conv2d_input(x, data_format)
   padding = _preprocess_padding(padding)
@@ -4050,7 +4089,7 @@ def pool2d(x,
     x = nn.avg_pool(
         x, pool_size, strides, padding=padding, data_format=tf_data_format)
   else:
-    raise ValueError('Invalid pooling mode:', pool_mode)
+    raise ValueError('Invalid pooling mode: ' + str(pool_mode))
 
   if data_format == 'channels_first' and tf_data_format == 'NHWC':
     x = array_ops.transpose(x, (0, 3, 1, 2))  # NHWC -> NCHW
@@ -4085,7 +4124,7 @@ def pool3d(x,
   if data_format is None:
     data_format = image_data_format()
   if data_format not in {'channels_first', 'channels_last'}:
-    raise ValueError('Unknown data_format ' + str(data_format))
+    raise ValueError('Unknown data_format: ' + str(data_format))
 
   x, tf_data_format = _preprocess_conv3d_input(x, data_format)
   padding = _preprocess_padding(padding)
@@ -4103,7 +4142,7 @@ def pool3d(x,
     x = nn.avg_pool3d(
         x, pool_size, strides, padding=padding, data_format=tf_data_format)
   else:
-    raise ValueError('Invalid pooling mode:', pool_mode)
+    raise ValueError('Invalid pooling mode: ' + str(pool_mode))
 
   if data_format == 'channels_first' and tf_data_format == 'NDHWC':
     x = array_ops.transpose(x, (0, 4, 1, 2, 3))
@@ -4134,7 +4173,7 @@ def local_conv1d(inputs, kernel, kernel_size, strides, data_format=None):
   if data_format is None:
     data_format = image_data_format()
   if data_format not in {'channels_first', 'channels_last'}:
-    raise ValueError('Unknown data_format ' + str(data_format))
+    raise ValueError('Unknown data_format: ' + str(data_format))
 
   stride = strides[0]
   kernel_shape = int_shape(kernel)
@@ -4190,7 +4229,7 @@ def local_conv2d(inputs,
   if data_format is None:
     data_format = image_data_format()
   if data_format not in {'channels_first', 'channels_last'}:
-    raise ValueError('Unknown data_format ' + str(data_format))
+    raise ValueError('Unknown data_format: ' + str(data_format))
 
   stride_row, stride_col = strides
   output_row, output_col = output_shape
@@ -4243,7 +4282,7 @@ def bias_add(x, bias, data_format=None):
   if data_format is None:
     data_format = image_data_format()
   if data_format not in {'channels_first', 'channels_last'}:
-    raise ValueError('Unknown data_format ' + str(data_format))
+    raise ValueError('Unknown data_format: ' + str(data_format))
   bias_shape = int_shape(bias)
   if len(bias_shape) != 1 and len(bias_shape) != ndim(x) - 1:
     raise ValueError(

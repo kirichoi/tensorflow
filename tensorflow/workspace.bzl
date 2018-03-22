@@ -5,69 +5,23 @@ load("//third_party/tensorrt:tensorrt_configure.bzl", "tensorrt_configure")
 load("//third_party/mkl:build_defs.bzl", "mkl_repository")
 load("//third_party/git:git_configure.bzl", "git_configure")
 load("//third_party/py:python_configure.bzl", "python_configure")
+
 load("//third_party/sycl:sycl_configure.bzl", "sycl_configure")
 load("//third_party/toolchains/clang6:repo.bzl", "clang6_configure")
 load("//third_party/toolchains/cpus/arm:arm_compiler_configure.bzl", "arm_compiler_configure")
 load("//third_party:repo.bzl", "tf_http_archive")
+load("//third_party/clang_toolchain:cc_configure_clang.bzl", "cc_download_clang_toolchain")
 load("@io_bazel_rules_closure//closure/private:java_import_external.bzl", "java_import_external")
 load("@io_bazel_rules_closure//closure:defs.bzl", "filegroup_external")
 
-def _extract_version_number(bazel_version):
-  """Extracts the semantic version number from a version string
-
-  Args:
-    bazel_version: the version string that begins with the semantic version
-      e.g. "1.2.3rc1 abc1234" where "abc1234" is a commit hash.
-
-  Returns:
-    The semantic version string, like "1.2.3".
-  """
-  for i in range(len(bazel_version)):
-    c = bazel_version[i]
-    if not (c.isdigit() or c == "."):
-      return bazel_version[:i]
-  return bazel_version
-
-# Parse the bazel version string from `native.bazel_version`.
-# e.g.
-# "0.10.0rc1 abc123d" => (0, 10, 0)
-# "0.3.0" => (0, 3, 0)
-def _parse_bazel_version(bazel_version):
-  """Parses a version string into a 3-tuple of ints
-
-  int tuples can be compared directly using binary operators (<, >).
-
-  Args:
-    bazel_version: the Bazel version string
-
-  Returns:
-    An int 3-tuple of a (major, minor, patch) version.
-  """
-
-  version = _extract_version_number(bazel_version)
-  return tuple([int(n) for n in version.split(".")])
-
-def check_bazel_version_at_least(minimum_bazel_version):
-  if "bazel_version" not in dir(native):
-    fail("\nCurrent Bazel version is lower than 0.2.1, expected at least %s\n" % minimum_bazel_version)
-  elif not native.bazel_version:
-    print("\nCurrent Bazel is not a release version, cannot check for compatibility.")
-    print("Make sure that you are running at least Bazel %s.\n" % minimum_bazel_version)
-    return
-
-  if _parse_bazel_version(native.bazel_version) < _parse_bazel_version(minimum_bazel_version):
-    fail("\nCurrent Bazel version is {}, expected at least {}\n".format(
-        native.bazel_version, minimum_bazel_version))
 
 # If TensorFlow is linked as a submodule.
 # path_prefix is no longer used.
 # tf_repo_name is thought to be under consideration.
 def tf_workspace(path_prefix="", tf_repo_name=""):
-  # We must check the bazel version before trying to parse any other BUILD
-  # files, in case the parsing of those build files depends on the bazel
-  # version we require here.
-  check_bazel_version_at_least("0.5.4")
+  # Note that we check the minimum bazel version in WORKSPACE.
   clang6_configure(name="local_config_clang6")
+  cc_download_clang_toolchain(name="local_config_download_clang")
   cuda_configure(name="local_config_cuda")
   tensorrt_configure(name="local_config_tensorrt")
   git_configure(name="local_config_git")
@@ -126,6 +80,7 @@ def tf_workspace(path_prefix="", tf_repo_name=""):
       sha256 = "0cadb31a35b514bf2dfd6b5d38205da94ef326ec6908fc3fd7c269948467214f",
       strip_prefix = "eigen-eigen-2355b229ea4c",
       build_file = str(Label("//third_party:eigen.BUILD")),
+      patch_file = str(Label("//third_party:eigen_fix_cuda_compilation.patch"))
   )
 
   tf_http_archive(
@@ -179,11 +134,11 @@ def tf_workspace(path_prefix="", tf_repo_name=""):
   tf_http_archive(
       name = "gemmlowp",
       urls = [
-          "https://mirror.bazel.build/github.com/google/gemmlowp/archive/d4d1e29a62192d8defdc057b913ef36ca582ac98.zip",
-          "https://github.com/google/gemmlowp/archive/d4d1e29a62192d8defdc057b913ef36ca582ac98.zip",
+          "https://mirror.bazel.build/github.com/google/gemmlowp/archive/7c7c744640ddc3d0af18fb245b4d23228813a71b.zip",
+          "https://github.com/google/gemmlowp/archive/7c7c744640ddc3d0af18fb245b4d23228813a71b.zip",
       ],
-      sha256 = "e2bee7afd3c43028f23dd0d7f85ddd8b21aaf79c572b658e56164ef502b2b9c7",
-      strip_prefix = "gemmlowp-d4d1e29a62192d8defdc057b913ef36ca582ac98",
+      sha256 = "b852cc90259a7357c8a323f108f2cec6e85979fc3b18b5590b99e0130044b2cf",
+      strip_prefix = "gemmlowp-7c7c744640ddc3d0af18fb245b4d23228813a71b",
   )
 
   tf_http_archive(
@@ -386,11 +341,11 @@ def tf_workspace(path_prefix="", tf_repo_name=""):
   tf_http_archive(
       name = "nsync",
       urls = [
-          "https://mirror.bazel.build/github.com/google/nsync/archive/8502189abfa44c249c01c2cad64e6ed660a9a668.tar.gz",
-          "https://github.com/google/nsync/archive/8502189abfa44c249c01c2cad64e6ed660a9a668.tar.gz",
+          "https://mirror.bazel.build/github.com/google/nsync/archive/0559ce013feac8db639ee1bf776aca0325d28777.tar.gz",
+          "https://github.com/google/nsync/archive/0559ce013feac8db639ee1bf776aca0325d28777.tar.gz",
       ],
-      sha256 = "51f81ff4202bbb820cdbedc061bd2eb6765f2b5c06489e7a8694bedac329e8f8",
-      strip_prefix = "nsync-8502189abfa44c249c01c2cad64e6ed660a9a668",
+      sha256 = "6284454c5cd8b1dae2eeb8cf5eb63004de930b5427ed5f6b1aa793513df6b361",
+      strip_prefix = "nsync-0559ce013feac8db639ee1bf776aca0325d28777",
   )
 
   tf_http_archive(
@@ -450,11 +405,11 @@ def tf_workspace(path_prefix="", tf_repo_name=""):
   tf_http_archive(
       name = "grpc",
       urls = [
-          "https://mirror.bazel.build/github.com/grpc/grpc/archive/730b778632e79cc3c96ad237f282d687ee325ce7.tar.gz",
-          "https://github.com/grpc/grpc/archive/730b778632e79cc3c96ad237f282d687ee325ce7.tar.gz",
+          "https://mirror.bazel.build/github.com/grpc/grpc/archive/575bda39755b98d1f7099406bb57a6e3b2074874.tar.gz",
+          "https://github.com/grpc/grpc/archive/575bda39755b98d1f7099406bb57a6e3b2074874.tar.gz",
       ],
-      sha256 = "8c91a8d12e1e868cf51f7340b75507a8aa017a7e1b56f46ed6816aeb803dc9bd",
-      strip_prefix = "grpc-730b778632e79cc3c96ad237f282d687ee325ce7",
+      sha256 = "f08a5c8e265191b39cc74915b1bc1fd380d86cd0176c92b7cce30b6ac50514ad",
+      strip_prefix = "grpc-575bda39755b98d1f7099406bb57a6e3b2074874",
   )
 
   tf_http_archive(
@@ -473,11 +428,11 @@ def tf_workspace(path_prefix="", tf_repo_name=""):
   tf_http_archive(
       name = "llvm",
       urls = [
-          "https://mirror.bazel.build/github.com/llvm-mirror/llvm/archive/ba2e473a530286f386d18a95c9de4d673d4a21dc.tar.gz",
-          "https://github.com/llvm-mirror/llvm/archive/ba2e473a530286f386d18a95c9de4d673d4a21dc.tar.gz",
+          "https://mirror.bazel.build/github.com/llvm-mirror/llvm/archive/1c3cdea2f181d8e14ee184466c5fb237f1b4cda8.tar.gz",
+          "https://github.com/llvm-mirror/llvm/archive/1c3cdea2f181d8e14ee184466c5fb237f1b4cda8.tar.gz",
       ],
-      sha256 = "0885a7c01220d2a96aeef4ff9aee016837150af839956d18af1845ea1acd0105",
-      strip_prefix = "llvm-ba2e473a530286f386d18a95c9de4d673d4a21dc",
+      sha256 = "1efbb9b05af88368be984d2f6526061d4a857181ef10f8841889a3a46869bb01",
+      strip_prefix = "llvm-1c3cdea2f181d8e14ee184466c5fb237f1b4cda8",
       build_file = str(Label("//third_party/llvm:llvm.BUILD")),
   )
 
@@ -641,11 +596,11 @@ def tf_workspace(path_prefix="", tf_repo_name=""):
   )
 
   java_import_external(
-      name = "javax_validation",
-      jar_sha256 = "e459f313ebc6db2483f8ceaad39af07086361b474fa92e40f442e8de5d9895dc",
+      name = "org_checkerframework_qual",
+      jar_sha256 = "a17501717ef7c8dda4dba73ded50c0d7cde440fd721acfeacbf19786ceac1ed6",
       jar_urls = [
-          "http://mirror.bazel.build/repo1.maven.org/maven2/javax/validation/validation-api/1.0.0.GA/validation-api-1.0.0.GA.jar",
-          "http://repo1.maven.org/maven2/javax/validation/validation-api/1.0.0.GA/validation-api-1.0.0.GA.jar",
+          "http://mirror.bazel.build/repo1.maven.org/maven2/org/checkerframework/checker-qual/2.4.0/checker-qual-2.4.0.jar",
+          "http://repo1.maven.org/maven2/org/checkerframework/checker-qual/2.4.0/checker-qual-2.4.0.jar",
       ],
       licenses = ["notice"],  # Apache 2.0
   )
@@ -664,15 +619,12 @@ def tf_workspace(path_prefix="", tf_repo_name=""):
   tf_http_archive(
       name = "cub_archive",
       urls = [
-          "https://mirror.bazel.build/github.com/NVlabs/cub/archive/1.7.4.zip",
-          "https://github.com/NVlabs/cub/archive/1.7.4.zip",
+          "https://mirror.bazel.build/github.com/NVlabs/cub/archive/1.8.0.zip",
+          "https://github.com/NVlabs/cub/archive/1.8.0.zip",
       ],
-      sha256 = "20a1a39fd97e5da7f40f5f2e7fd73fd2ea59f9dc4bb8a6c5f228aa543e727e31",
-      strip_prefix = "cub-1.7.4",
+      sha256 = "6bfa06ab52a650ae7ee6963143a0bbc667d6504822cbd9670369b598f18c58c3",
+      strip_prefix = "cub-1.8.0",
       build_file = str(Label("//third_party:cub.BUILD")),
-      # TODO: remove the patch when upstream fix is accepted and released.
-      #       PR with a fix: https://github.com/NVlabs/cub/pull/125
-      patch_file = str(Label("//third_party/cub:fix_compilation_in_clang.patch")),
   )
 
   tf_http_archive(
@@ -690,11 +642,11 @@ def tf_workspace(path_prefix="", tf_repo_name=""):
   tf_http_archive(
       name = "bazel_toolchains",
       urls = [
-          "https://mirror.bazel.build/github.com/bazelbuild/bazel-toolchains/archive/f3b09700fae5d7b6e659d7cefe0dcc6e8498504c.tar.gz",
-          "https://github.com/bazelbuild/bazel-toolchains/archive/f3b09700fae5d7b6e659d7cefe0dcc6e8498504c.tar.gz",
+          "https://mirror.bazel.build/github.com/bazelbuild/bazel-toolchains/archive/44200e0c026d86c53470d107b3697a3e46469c43.tar.gz",
+          "https://github.com/bazelbuild/bazel-toolchains/archive/44200e0c026d86c53470d107b3697a3e46469c43.tar.gz",
       ],
-      sha256 = "ed829b5eea8af1f405f4cc3d6ecfc3b1365bb7843171036030a31b5127002311",
-      strip_prefix = "bazel-toolchains-f3b09700fae5d7b6e659d7cefe0dcc6e8498504c",
+      strip_prefix = "bazel-toolchains-44200e0c026d86c53470d107b3697a3e46469c43",
+      sha256 = "699b55a6916c687f4b7dc092dbbf5f64672cde0dc965f79717735ec4e5416556",
   )
 
   tf_http_archive(

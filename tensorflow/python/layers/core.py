@@ -35,7 +35,9 @@ from tensorflow.python.layers import utils
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import init_ops
 from tensorflow.python.ops import math_ops
+from tensorflow.python.ops import gen_math_ops
 from tensorflow.python.ops import nn
+from tensorflow.python.ops import nn_ops
 from tensorflow.python.ops import standard_ops
 from tensorflow.python.util.tf_export import tf_export
 
@@ -154,11 +156,11 @@ class Dense(base.Layer):
       outputs = standard_ops.tensordot(inputs, self.kernel, [[len(shape) - 1],
                                                              [0]])
       # Reshape the output back to the original ndim of the input.
-      if context.in_graph_mode():
+      if not context.executing_eagerly():
         output_shape = shape[:-1] + [self.units]
         outputs.set_shape(output_shape)
     else:
-      outputs = standard_ops.matmul(inputs, self.kernel)
+      outputs = gen_math_ops.mat_mul(inputs, self.kernel)
     if self.use_bias:
       outputs = nn.bias_add(outputs, self.bias)
     if self.activation is not None:
@@ -291,13 +293,7 @@ class Dropout(base.Layer):
     # shapes with dynamically sized inputs.
     if self.noise_shape is None:
       return self.noise_shape
-
-    symbolic_shape = array_ops.shape(inputs)
-    noise_shape = [
-        symbolic_shape[axis] if shape is None else shape
-        for axis, shape in enumerate(self.noise_shape)
-    ]
-    return noise_shape
+    return nn_ops._get_noise_shape(inputs, self.noise_shape)
 
   def call(self, inputs, training=False):
 
@@ -378,7 +374,7 @@ class Flatten(base.Layer):
 
   def call(self, inputs):
     outputs = array_ops.reshape(inputs, (array_ops.shape(inputs)[0], -1))
-    if context.in_graph_mode():
+    if not context.executing_eagerly():
       outputs.set_shape(self.compute_output_shape(inputs.get_shape()))
     return outputs
 
