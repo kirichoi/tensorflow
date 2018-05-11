@@ -52,6 +52,8 @@ UnaryOperation OpcodeToUnaryOperation(HloOpcode opcode) {
       return UNOP_ABS;
     case HloOpcode::kCeil:
       return UNOP_CEIL;
+    case HloOpcode::kClz:
+      return UNOP_CLZ;
     case HloOpcode::kCos:
       return UNOP_COS;
     case HloOpcode::kExp:
@@ -170,11 +172,11 @@ tensorflow::Status ExpectNotTupleOrOpaque(const Shape& shape,
                                           tensorflow::StringPiece op_type) {
   if (ShapeUtil::IsTuple(shape)) {
     return InvalidArgument("Expected non-tuple argument for %s, but got %s.",
-                           op_type.ToString().c_str(),
+                           std::string(op_type).c_str(),
                            ShapeUtil::HumanString(shape).c_str());
   } else if (ShapeUtil::IsOpaque(shape)) {
     return InvalidArgument("Expected non-opaque argument for %s, but got %s.",
-                           op_type.ToString().c_str(),
+                           std::string(op_type).c_str(),
                            ShapeUtil::HumanString(shape).c_str());
   } else {
     return tensorflow::Status::OK();
@@ -304,12 +306,17 @@ StatusOr<Shape> InferWindowOutputShape(const Shape& base_shape,
 
 /* static */ StatusOr<Shape> ShapeInference::InferUnaryOpShape(
     HloOpcode opcode, const HloInstruction* operand) {
+  return InferUnaryOpShape(opcode, operand->shape());
+}
+
+/* static */ StatusOr<Shape> ShapeInference::InferUnaryOpShape(
+    HloOpcode opcode, const Shape& shape) {
   // There is no copy operation at the proto level, so handle copy explicitly.
   if (opcode == HloOpcode::kCopy) {
-    return operand->shape();
+    return shape;
   }
 
-  return InferUnaryOpShape(OpcodeToUnaryOperation(opcode), operand->shape());
+  return InferUnaryOpShape(OpcodeToUnaryOperation(opcode), shape);
 }
 
 /* static */ StatusOr<Shape> ShapeInference::InferUnaryOpShape(
@@ -355,6 +362,7 @@ StatusOr<Shape> InferWindowOutputShape(const Shape& base_shape,
             arg, primitive_util::ComplexComponentType(arg.element_type()));
       }
       return arg;
+    case UNOP_CLZ:
     case UNOP_NEGATE:
     case UNOP_ROUND_NEAREST_AFZ:
     case UNOP_SIGN:
@@ -1033,8 +1041,12 @@ ShapeInference::InferDegenerateDimensionBroadcastShape(
 /* static */ StatusOr<Shape> ShapeInference::InferTernaryOpShape(
     HloOpcode opcode, const HloInstruction* lhs, const HloInstruction* rhs,
     const HloInstruction* ehs) {
-  return InferTernaryOpShape(OpcodeToTernaryOperation(opcode), lhs->shape(),
-                             rhs->shape(), ehs->shape());
+  return InferTernaryOpShape(opcode, lhs->shape(), rhs->shape(), ehs->shape());
+}
+
+/* static */ StatusOr<Shape> ShapeInference::InferTernaryOpShape(
+    HloOpcode opcode, const Shape& lhs, const Shape& rhs, const Shape& ehs) {
+  return InferTernaryOpShape(OpcodeToTernaryOperation(opcode), lhs, rhs, ehs);
 }
 
 /* static */ StatusOr<Shape> ShapeInference::InferTernaryOpShape(
@@ -1061,6 +1073,12 @@ ShapeInference::InferDegenerateDimensionBroadcastShape(
   for (const HloInstruction* operand : operands) {
     operand_shapes.push_back(&operand->shape());
   }
+  return InferVariadicOpShape(opcode, operand_shapes);
+}
+
+/* static */ StatusOr<Shape> ShapeInference::InferVariadicOpShape(
+    HloOpcode opcode,
+    tensorflow::gtl::ArraySlice<const Shape*> operand_shapes) {
   return InferVariadicOpShape(OpcodeToVariadicOperation(opcode),
                               operand_shapes);
 }

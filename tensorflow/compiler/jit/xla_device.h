@@ -26,7 +26,7 @@ limitations under the License.
 #ifndef TENSORFLOW_COMPILER_JIT_XLA_DEVICE_H_
 #define TENSORFLOW_COMPILER_JIT_XLA_DEVICE_H_
 
-#include "tensorflow/compiler/jit/xla_tensor_info.h"
+#include "tensorflow/compiler/jit/xla_tensor.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
 #include "tensorflow/compiler/xla/client/local_client.h"
 #include "tensorflow/core/common_runtime/device_factory.h"
@@ -49,23 +49,20 @@ class XlaDevice : public LocalDevice {
   // retrieved e.g., when lazily creating the XlaCompilationCache device.
   class Metadata {
    public:
-    Metadata(int device_ordinal, perftools::gputools::Platform* platform,
-             const DeviceType& device_type,
-             std::unique_ptr<XlaTensorInfoManager>* tensor_info_manager);
+    Metadata(int device_ordinal, se::Platform* platform,
+             const DeviceType& device_type);
 
     // The index of the device on this host.
     int device_ordinal() const;
 
-    perftools::gputools::Platform* platform() const;
+    se::Platform* platform() const;
     xla::LocalClient* client() const;
     const DeviceType& jit_device_type() const;
-    XlaTensorInfoManager& tensor_info_manager() const;
 
    private:
     const int device_ordinal_;
     const DeviceType device_type_;
-    perftools::gputools::Platform* platform_;  // Not owned.
-    std::unique_ptr<XlaTensorInfoManager>& tensor_info_manager_;
+    se::Platform* platform_;  // Not owned.
 
     TF_DISALLOW_COPY_AND_ASSIGN(Metadata);
   };
@@ -88,8 +85,7 @@ class XlaDevice : public LocalDevice {
 
   XlaDevice(const SessionOptions& options, const DeviceAttributes& attrs,
             int device_ordinal, const DeviceType& jit_device_name,
-            ::perftools::gputools::Platform* platform,
-            bool transfer_as_literal);
+            se::Platform* platform, bool transfer_as_literal);
   ~XlaDevice() override;
 
   Allocator* GetAllocator(AllocatorAttributes attr) override;
@@ -106,7 +102,11 @@ class XlaDevice : public LocalDevice {
                              Tensor* tensor) override;
 
   xla::LocalClient* client() const;
-  xla::StatusOr<::perftools::gputools::Stream*> GetStream();
+  xla::StatusOr<se::Stream*> GetStream();
+
+  // If not already set, create and set GpuDeviceInfo.
+  // Not thread-safe
+  Status CreateAndSetGpuDeviceInfo();
 
  private:
   // The metadata of this XlaDevice.
@@ -117,22 +117,19 @@ class XlaDevice : public LocalDevice {
   DeviceType jit_device_name_;
   // Memory allocator associated with this device.
   Allocator* xla_allocator_;                   // Not owned.
-  ::perftools::gputools::Platform* platform_;  // Not owned.
+  se::Platform* platform_;                     // Not owned.
   // Stream associated with this device. Operations enqueued on this
   // stream are executed on the device. Operations include data
   // copying back and forth between CPU and the device, and
   // computations enqueued by XLA.
   xla::Backend::StreamPtr stream_;
-  // Manages sideband data about tensors, in particular the on-device shape tree
-  // if the tensor requires multiple device buffers to represent (for example,
-  // tuple shapes).
-  // This is a unique_ptr because XlaTensorInfoManager is non-copy-constructible
-  // and we need to initialize this lazily (as we also lazily initialize the
-  // underlying allocator).
-  std::unique_ptr<XlaTensorInfoManager> tensor_info_manager_;
   // Must we use XLA's transfer manager for correct host<->device transfers? if
   // false, we can use ThenMemcpy() instead.
   bool transfer_as_literal_;
+
+  // If set, holds default device context (that we must Unref)
+  // and its stream.
+  std::unique_ptr<GpuDeviceInfo> gpu_device_info_;
 };
 
 // Builds OpKernel registrations on 'device' for the JIT operators

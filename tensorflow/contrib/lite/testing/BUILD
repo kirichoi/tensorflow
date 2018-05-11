@@ -18,6 +18,7 @@ gen_zipped_test_files(
     name = "optest",
     files = [
         "add.zip",
+        "arg_max.zip",
         "avg_pool.zip",
         "batch_to_space_nd.zip",
         "concat.zip",
@@ -27,18 +28,27 @@ gen_zipped_test_files(
         "depthwiseconv.zip",
         "div.zip",
         "exp.zip",
+        "floor.zip",
         "fully_connected.zip",
         "fused_batch_norm.zip",
         "gather.zip",
         "global_batch_norm.zip",
+        "greater.zip",
+        "greater_equal.zip",
         "l2_pool.zip",
         "l2norm.zip",
+        "less.zip",
+        "less_equal.zip",
         "local_response_norm.zip",
         "log_softmax.zip",
         "max_pool.zip",
+        "maximum.zip",
         "mean.zip",
+        "minimum.zip",
         "mul.zip",
+        "neg.zip",
         "pad.zip",
+        "padv2.zip",
         "relu.zip",
         "relu1.zip",
         "relu6.zip",
@@ -54,6 +64,7 @@ gen_zipped_test_files(
         "sub.zip",
         "topk.zip",
         "transpose.zip",
+        "where.zip",
     ],
 )
 
@@ -158,6 +169,9 @@ cc_test(
     size = "small",
     srcs = ["tflite_driver_test.cc"],
     data = ["//tensorflow/contrib/lite:testdata/multi_add.bin"],
+    tags = [
+        "tflite_not_portable_android",
+    ],
     deps = [
         ":tflite_driver",
         "@com_google_googletest//:gtest_main",
@@ -192,7 +206,6 @@ cc_library(
 
 cc_library(
     name = "util",
-    testonly = 1,
     hdrs = ["util.h"],
 )
 
@@ -247,7 +260,6 @@ cc_test(
 
 cc_library(
     name = "generate_testspec",
-    testonly = 1,
     srcs = ["generate_testspec.cc"],
     hdrs = ["generate_testspec.h"],
     deps = [
@@ -273,7 +285,6 @@ cc_test(
 
 cc_library(
     name = "tflite_diff_util",
-    testonly = 1,
     srcs = ["tflite_diff_util.cc"],
     hdrs = ["tflite_diff_util.h"],
     deps = [
@@ -291,7 +302,6 @@ cc_library(
 
 cc_library(
     name = "tflite_diff_flags",
-    testonly = 1,
     hdrs = ["tflite_diff_flags.h"],
     deps = [
         ":split",
@@ -334,6 +344,15 @@ tf_cc_test(
     ],
 )
 
+cc_binary(
+    name = "tflite_diff",
+    srcs = ["tflite_diff_example_test.cc"],
+    deps = [
+        ":tflite_diff_flags",
+        ":tflite_diff_util",
+    ],
+)
+
 tf_cc_test(
     name = "generated_examples_zip_test",
     size = "large",
@@ -370,18 +389,6 @@ tf_cc_test(
             "//tensorflow/core:android_tensorflow_test_lib",
         ],
     }),
-)
-
-filegroup(
-    name = "all_files",
-    srcs = glob(
-        ["**/*"],
-        exclude = [
-            "**/METADATA",
-            "**/OWNERS",
-        ],
-    ),
-    visibility = ["//tensorflow:__subpackages__"],
 )
 
 tflite_portable_test_suite()

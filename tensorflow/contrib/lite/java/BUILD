@@ -46,6 +46,38 @@ android_library(
     ],
 )
 
+android_library(
+    name = "ovicbenchmarkerlib",
+    srcs = [
+        "ovic/src/main/java/org/tensorflow/ovic/OvicClassifier.java",
+        "ovic/src/main/java/org/tensorflow/ovic/OvicSingleImageResult.java",
+    ],
+    manifest = "AndroidManifest.xml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":tensorflowlite",
+        "//tensorflow/contrib/lite/java/src/testhelper/java/org/tensorflow/lite:testhelper",
+        "@org_checkerframework_qual",
+    ],
+)
+
+java_library(
+    name = "ovicbenchmarkerlib_java",
+    srcs = [
+        "ovic/src/main/java/org/tensorflow/ovic/OvicClassifier.java",
+        "ovic/src/main/java/org/tensorflow/ovic/OvicSingleImageResult.java",
+    ],
+    javacopts = JAVACOPTS,
+    visibility = ["//visibility:public"],
+    deps = [
+        ":libtensorflowlite_jni.so",
+        ":tensorflowlite_java",
+        "//tensorflow/contrib/lite/java/src/main/native",
+        "//tensorflow/contrib/lite/java/src/testhelper/java/org/tensorflow/lite:testhelper",
+        "@org_checkerframework_qual",
+    ],
+)
+
 java_library(
     name = "tensorflowlitelib",
     srcs = glob(
@@ -100,6 +132,7 @@ java_test(
         "src/testdata/int64.bin",
         "src/testdata/invalid_model.bin",
         "src/testdata/uint8.bin",
+        "src/testdata/with_custom_op.lite",
     ],
     javacopts = JAVACOPTS,
     test_class = "org.tensorflow.lite.NativeInterpreterWrapperTest",
@@ -147,6 +180,24 @@ java_test(
     ],
 )
 
+java_test(
+    name = "OvicClassifierTest",
+    size = "medium",
+    srcs = ["ovic/src/test/java/org/tensorflow/ovic/OvicClassifierTest.java"],
+    data = [
+        "//tensorflow/contrib/lite/java/ovic/src/testdata:labels.txt",
+        "//tensorflow/contrib/lite/java/ovic/src/testdata:ovic_testdata",
+    ],
+    javacopts = JAVACOPTS,
+    test_class = "org.tensorflow.ovic.OvicClassifierTest",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ovicbenchmarkerlib_java",
+        "@com_google_truth",
+        "@junit",
+    ],
+)
+
 filegroup(
     name = "libtensorflowlite_jni",
     srcs = select({
@@ -166,16 +217,4 @@ tflite_jni_binary(
     deps = [
         "//tensorflow/contrib/lite/java/src/main/native",
     ],
-)
-
-filegroup(
-    name = "all_files",
-    srcs = glob(
-        ["**/*"],
-        exclude = [
-            "**/METADATA",
-            "**/OWNERS",
-        ],
-    ),
-    visibility = ["//tensorflow:__subpackages__"],
 )

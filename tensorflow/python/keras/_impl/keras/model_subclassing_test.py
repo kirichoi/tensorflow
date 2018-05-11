@@ -19,15 +19,19 @@ from __future__ import division
 from __future__ import print_function
 
 import os
-import tempfile
 
 import numpy as np
+import six
 
+from tensorflow.python.data.ops import dataset_ops
+from tensorflow.python.eager import context
 from tensorflow.python.framework import tensor_shape
 from tensorflow.python.framework import test_util
 from tensorflow.python.keras._impl import keras
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import resource_variable_ops
 from tensorflow.python.platform import test
+from tensorflow.python.training import checkpointable
 from tensorflow.python.training.rmsprop import RMSPropOptimizer
 
 try:
@@ -36,6 +40,7 @@ except ImportError:
   h5py = None
 
 
+# pylint: disable=not-callable
 class SimpleTestModel(keras.Model):
 
   def __init__(self, use_bn=False, use_dp=False, num_classes=10):
@@ -104,7 +109,7 @@ class NestedTestModel1(keras.Model):
   def call(self, inputs):
     x = self.dense1(inputs)
     x = self.bn(x)
-    x = self.test_net(x)  # pylint: disable=not-callable
+    x = self.test_net(x)
     return self.dense2(x)
 
 
@@ -161,7 +166,7 @@ def get_nested_model_3(input_dim, num_classes):
       return tensor_shape.TensorShape((input_shape[0], 5))
 
   test_model = Inner()
-  x = test_model(x)  # pylint: disable=not-callable
+  x = test_model(x)
   outputs = keras.layers.Dense(num_classes)(x)
   return keras.Model(inputs, outputs, name='nested_model_3')
 
@@ -245,6 +250,26 @@ class ModelSubclassingTest(test.TestCase):
 
       model.fit([x1, x2], [y1, y2], epochs=2, steps_per_epoch=10, verbose=0)
       _ = model.evaluate(steps=10, verbose=0)
+
+  @test_util.run_in_graph_and_eager_modes()
+  def test_single_io_workflow_with_dataset_iterators(self):
+    num_classes = 2
+    num_samples = 10
+    input_dim = 50
+
+    with self.test_session():
+      model = SimpleTestModel(num_classes=num_classes, use_dp=True, use_bn=True)
+      model.compile(loss='mse', optimizer=RMSPropOptimizer(learning_rate=0.001))
+
+      x = np.ones((num_samples, input_dim))
+      y = np.zeros((num_samples, num_classes))
+      dataset = dataset_ops.Dataset.from_tensor_slices((x, y))
+      dataset = dataset.repeat(100)
+      dataset = dataset.batch(10)
+      iterator = dataset.make_one_shot_iterator()
+
+      model.fit(iterator, epochs=2, steps_per_epoch=10, verbose=0)
+      _ = model.evaluate(iterator, steps=10, verbose=0)
 
   def test_multi_io_workflow_with_numpy_arrays_and_custom_placeholders(self):
 
@@ -417,8 +442,6 @@ class ModelSubclassingTest(test.TestCase):
 
   @test_util.run_in_graph_and_eager_modes()
   def test_saving(self):
-    if h5py is None:
-      return  # Skip test if models cannot be saved.
 
     num_classes = (2, 3)
     num_samples = 100
@@ -434,20 +457,30 @@ class ModelSubclassingTest(test.TestCase):
     model.fit([x1, x2], [y1, y2], epochs=2, batch_size=32, verbose=0)
     y_ref_1, y_ref_2 = model.predict([x1, x2])
 
-    fd, fname = tempfile.mkstemp('.h5')
-    model.save_weights(fname)
+    tf_format_name = os.path.join(self.get_temp_dir(), 'ckpt')
+    model.save_weights(tf_format_name)
+    if h5py is not None:
+      hdf5_format_name = os.path.join(self.get_temp_dir(), 'weights.h5')
+      model.save_weights(hdf5_format_name)
 
     model = MultiIOTestModel(num_classes=num_classes, use_bn=True)
-    # need to build the model before loading weights
-    # (otherwise no weights to load)
-    model._set_inputs([x1, x2])
-    model.load_weights(fname)
+
+    if h5py is not None:
+      with self.assertRaises(ValueError):
+        model.load_weights(hdf5_format_name)
+
+    model.load_weights(tf_format_name)
 
     y1, y2 = model.predict([x1, x2])
     self.assertAllClose(y_ref_1, y1, atol=1e-5)
     self.assertAllClose(y_ref_2, y2, atol=1e-5)
-    os.close(fd)
-    os.remove(fname)
+
+    if h5py is not None:
+      model.load_weights(hdf5_format_name)
+
+      y1, y2 = model.predict([x1, x2])
+      self.assertAllClose(y_ref_1, y1, atol=1e-5)
+      self.assertAllClose(y_ref_2, y2, atol=1e-5)
 
   @test_util.run_in_graph_and_eager_modes()
   def test_summary(self):
@@ -573,6 +606,140 @@ class ModelSubclassingTest(test.TestCase):
     loss = model.train_on_batch(x, y)
     self.assertGreater(loss, 0.1)
 
+  def test_no_dependency(self):
+    class Foo(keras.Model):
+
+      def __init__(self):
+        super(Foo, self).__init__()
+        self.isdep = keras.layers.Dense(1)
+        self.notdep = checkpointable.NoDependency(keras.layers.Dense(2))
+        self.notdep_var = checkpointable.NoDependency(
+            resource_variable_ops.ResourceVariable(1., name='notdep_var'))
+
+    m = Foo()
+    self.assertEqual([m.isdep, m.notdep], m.layers)
+    self.assertEqual(1, len(m._checkpoint_dependencies))
+    self.assertIs(m.isdep, m._checkpoint_dependencies[0].ref)
+    self.assertEqual('notdep_var:0', m.notdep_var.name)
+
+
+class CustomCallModel(keras.Model):
+
+  def __init__(self):
+    super(CustomCallModel, self).__init__()
+    self.dense1 = keras.layers.Dense(1, activation='relu')
+    self.dense2 = keras.layers.Dense(1, activation='softmax')
+
+  def call(self, first, second, fiddle_with_output='no', training=True):
+    combined = self.dense1(first) + self.dense2(second)
+    if fiddle_with_output == 'yes':
+      return 10. * combined
+    else:
+      return combined
+
+
+class CustomCallSignatureTests(test.TestCase):
+
+  @test_util.run_in_graph_and_eager_modes()
+  def test_no_inputs_in_signature(self):
+    model = CustomCallModel()
+    first = array_ops.ones([2, 3])
+    second = array_ops.ones([2, 5])
+    output = model(first, second)
+    self.evaluate([v.initializer for v in model.variables])
+    expected_output = self.evaluate(model.dense1(first) + model.dense2(second))
+    self.assertAllClose(expected_output, self.evaluate(output))
+    output = model(first, second, fiddle_with_output='yes')
+    self.assertAllClose(10. * expected_output, self.evaluate(output))
+    output = model(first, second=second, training=False)
+    self.assertAllClose(expected_output, self.evaluate(output))
+
+  @test_util.run_in_graph_and_eager_modes()
+  def test_inputs_in_signature(self):
+
+    class HasInputsAndOtherPositional(keras.Model):
+
+      def call(self, inputs, some_other_arg, training=False):
+        return inputs
+
+      def compute_output_shape(self, input_shape):
+        return input_shape
+
+    model = HasInputsAndOtherPositional()
+    with self.assertRaisesRegexp(
+        TypeError, 'everything else as a keyword argument'):
+      x1, x2 = keras.Input((1, 1)), keras.Input((1, 1))
+      model(x1, x2)
+
+  @test_util.run_in_graph_and_eager_modes()
+  def test_kwargs_in_signature(self):
+
+    class HasKwargs(keras.Model):
+
+      def call(self, x, y=3, **key_words):
+        return x
+
+    model = HasKwargs()
+    arg = array_ops.ones([])
+    model(arg, a=3)
+    if not context.executing_eagerly():
+      six.assertCountEqual(self, [arg], model.inputs)
+
+  @test_util.run_in_graph_and_eager_modes()
+  def test_args_in_signature(self):
+
+    class HasArgs(keras.Model):
+
+      def call(self, x, *args, **kwargs):
+        return [x] + list(args)
+
+      def compute_output_shape(self, input_shape):
+        return input_shape
+
+    model = HasArgs()
+    x1, x2, x3 = keras.Input((1, 1)), keras.Input((1, 1)), keras.Input((1, 1))
+    model(x1, x2, x3, a=3)
+    if not context.executing_eagerly():
+      six.assertCountEqual(self, [x1, x2, x3], model.inputs)
+
+  def test_args_and_keywords_in_signature(self):
+
+    class HasArgs(keras.Model):
+
+      def call(self, x, training=True, *args, **kwargs):
+        return x
+
+    with context.graph_mode():
+      model = HasArgs()
+      x1, x2, x3 = keras.Input((1, 1)), keras.Input((1, 1)), keras.Input((1, 1))
+      with self.assertRaisesRegexp(TypeError, 'args and arguments with'):
+        model(x1, x2, x3, a=3)
+
+  def test_training_no_default(self):
+
+    class TrainingNoDefault(keras.Model):
+
+      def call(self, x, training):
+        return x
+
+    with context.graph_mode():
+      model = TrainingNoDefault()
+      arg = array_ops.ones([])
+      model(arg, True)
+      six.assertCountEqual(self, [arg], model.inputs)
+
+  def test_training_no_default_with_positional(self):
+
+    class TrainingNoDefaultWithPositional(keras.Model):
+
+      def call(self, x, training, positional):
+        return x
+
+    with context.graph_mode():
+      model = TrainingNoDefaultWithPositional()
+      x1, x2, x3 = keras.Input((1, 1)), keras.Input((1, 1)), keras.Input((1, 1))
+      with self.assertRaisesRegexp(TypeError, 'after a non-input'):
+        model(x1, x2, x3)
 
 if __name__ == '__main__':
   test.main()

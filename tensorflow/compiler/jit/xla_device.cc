@@ -18,6 +18,7 @@ limitations under the License.
 #include <stdlib.h>
 #include <unordered_set>
 
+#include "absl/memory/memory.h"
 #include "tensorflow/compiler/jit/defs.h"
 #include "tensorflow/compiler/jit/xla_compile_on_demand_op.h"
 #include "tensorflow/compiler/jit/xla_device_context.h"
@@ -49,8 +50,6 @@ limitations under the License.
 #include "tensorflow/core/public/version.h"
 #include "tensorflow/core/util/device_name_utils.h"
 #include "tensorflow/core/util/stream_executor_util.h"
-
-namespace se = ::perftools::gputools;
 
 namespace tensorflow {
 
@@ -100,7 +99,7 @@ XlaDeviceAllocator* XlaDeviceAllocatorState::GetOrCreateXlaDeviceAllocator(
   }
 
   std::unique_ptr<XlaDeviceAllocator> alloc =
-      xla::MakeUnique<XlaDeviceAllocator>(backend, device_ordinal);
+      xla::MakeUnique<XlaDeviceAllocator>();
   XlaDeviceAllocator* alloc_ptr = alloc.get();
   state.allocators_[{backend, device_ordinal}] = std::move(alloc);
   return alloc_ptr;
@@ -121,7 +120,7 @@ XlaDeviceAllocator* XlaDeviceAllocatorState::GetOrCreateXlaDeviceAllocator(
 
   auto platform = se::MultiPlatformManager::PlatformWithName(platform_name);
   if (!platform.ok()) {
-    return StreamExecutorUtil::ConvertStatus(platform.status());
+    return platform.status();
   }
 
   const DeviceAttributes attrs = Device::BuildDeviceAttributes(
@@ -136,13 +135,11 @@ XlaDeviceAllocator* XlaDeviceAllocatorState::GetOrCreateXlaDeviceAllocator(
   return Status::OK();
 }
 
-XlaDevice::Metadata::Metadata(
-    int device_ordinal, se::Platform* platform, const DeviceType& device_type,
-    std::unique_ptr<XlaTensorInfoManager>* tensor_info_manager)
+XlaDevice::Metadata::Metadata(int device_ordinal, se::Platform* platform,
+                              const DeviceType& device_type)
     : device_ordinal_(device_ordinal),
       device_type_(device_type),
-      platform_(platform),
-      tensor_info_manager_(*tensor_info_manager) {}
+      platform_(platform) {}
 
 int XlaDevice::Metadata::device_ordinal() const { return device_ordinal_; }
 
@@ -157,12 +154,9 @@ const DeviceType& XlaDevice::Metadata::jit_device_type() const {
   return device_type_;
 }
 
-XlaTensorInfoManager& XlaDevice::Metadata::tensor_info_manager() const {
-  return *tensor_info_manager_;
-}
-
 /* static */ Status XlaDevice::GetMetadata(OpKernelContext* ctx,
                                            const Metadata** metadata) {
+  *metadata = nullptr;
   XlaDevice* xla_device =
       dynamic_cast<XlaDevice*>(ctx->device()->UnderlyingDevice());
   if (xla_device == nullptr) {
@@ -181,18 +175,20 @@ XlaDevice::XlaDevice(const SessionOptions& options,
                      const DeviceType& jit_device_name, se::Platform* platform,
                      bool transfer_as_literal)
     : LocalDevice(options, attrs),
-      xla_metadata_(
-          device_ordinal, platform, jit_device_name,
-          // Pass tensor_info_manager_ by reference as it is initialized lazily.
-          &tensor_info_manager_),
+      xla_metadata_(device_ordinal, platform, jit_device_name),
       device_ordinal_(device_ordinal),
       jit_device_name_(jit_device_name),
       xla_allocator_(nullptr),
       platform_(platform),
-      tensor_info_manager_(nullptr),
-      transfer_as_literal_(transfer_as_literal) {}
+      transfer_as_literal_(transfer_as_literal) {
+  VLOG(1) << "Created XLA device " << jit_device_name;
+}
 
-XlaDevice::~XlaDevice() {}
+XlaDevice::~XlaDevice() {
+  if (gpu_device_info_ != nullptr) {
+    gpu_device_info_->default_context->Unref();
+  }
+}
 
 xla::LocalClient* XlaDevice::client() const {
   // We lazily create the client because the platform commits to the
@@ -200,9 +196,8 @@ xla::LocalClient* XlaDevice::client() const {
   // don't want to do it until we get a chance to hook the platform up
   // to a simulator.
 
-  // For now GetOrCreateLocalClient always returns success when passed
-  // a non-null platform. If that changes we may have to plumb in some
-  // way to pass Status back.
+  // TODO(b/78468222): This can fail, at least when the backend is GPU and
+  // there is no GPU on the host.
   return xla::ClientLibrary::GetOrCreateLocalClient(platform_).ValueOrDie();
 }
 
@@ -215,7 +210,6 @@ Allocator* XlaDevice::GetAllocator(AllocatorAttributes attr) {
     xla::Backend* backend = client()->mutable_backend();
     xla_allocator_ = XlaDeviceAllocatorState::GetOrCreateXlaDeviceAllocator(
         backend, device_ordinal_);
-    tensor_info_manager_.reset(new XlaTensorInfoManager(xla_allocator_));
   }
   return xla_allocator_;
 }
@@ -228,16 +222,32 @@ xla::StatusOr<se::Stream*> XlaDevice::GetStream() {
   return stream_.get();
 }
 
+Status XlaDevice::CreateAndSetGpuDeviceInfo() {
+  if (gpu_device_info_ == nullptr) {
+    TF_ASSIGN_OR_RETURN(se::Stream * stream, GetStream());
+    // Call GetAllocator for the side-effect of ensuring the allocator
+    // is created.
+    GetAllocator({});
+    // XlaDevice owns both gpu_device_info_ and
+    // gpu_device_info_->default_context.
+    gpu_device_info_ = absl::make_unique<GpuDeviceInfo>();
+    gpu_device_info_->stream = stream;
+    gpu_device_info_->default_context =
+        new XlaDeviceContext(stream, client(), transfer_as_literal_);
+    set_tensorflow_gpu_device_info(gpu_device_info_.get());
+  }
+
+  return Status::OK();
+}
+
 Status XlaDevice::FillContextMap(const Graph* graph,
                                  DeviceContextMap* device_context_map) {
   VLOG(1) << "XlaDevice::FillContextMap";
   device_context_map->resize(graph->num_node_ids());
   TF_ASSIGN_OR_RETURN(se::Stream * stream, GetStream());
-  // Call GetAllocator for the side-effect of ensuring the allocator and
-  // XlaTensorInfoManager is created.
-  (void)GetAllocator({});
-  auto ctx = new XlaDeviceContext(stream, tensor_info_manager_.get(),
-                                  transfer_as_literal_);
+  // Call GetAllocator for the side-effect of ensuring the allocator is created.
+  GetAllocator({});
+  auto ctx = new XlaDeviceContext(stream, client(), transfer_as_literal_);
   for (Node* n : graph->nodes()) {
     VLOG(2) << n->id() << " : " << n->type_string() << " : " << n->name();
     ctx->Ref();
@@ -250,11 +260,10 @@ Status XlaDevice::FillContextMap(const Graph* graph,
 void XlaDevice::Compute(OpKernel* op_kernel, OpKernelContext* context) {
   VLOG(1) << "XlaDevice::Compute " << op_kernel->name() << ":"
           << op_kernel->type_string();
-  // When TraceMe profiling is off (which is the default), the
-  // following TraceMe constructor is simply a conditional test of
-  // false value. Measurements show that its overhead is negligible.
-  port::Tracing::TraceMe trace_me(op_kernel->name(), op_kernel->type_string(),
-                                  op_kernel->IsExpensive());
+  // When Xprof profiling is off (which is the default), constructing the
+  // activity is simple enough that its overhead is negligible.
+  tracing::ScopedActivity activity(op_kernel->name(), op_kernel->type_string(),
+                                   op_kernel->IsExpensive());
   op_kernel->Compute(context);
 }
 
@@ -262,8 +271,8 @@ void XlaDevice::ComputeAsync(AsyncOpKernel* op_kernel, OpKernelContext* context,
                              AsyncOpKernel::DoneCallback done) {
   VLOG(1) << "XlaDevice::ComputeAsync " << op_kernel->name() << ":"
           << op_kernel->type_string();
-  port::Tracing::TraceMe trace_me(op_kernel->name(), op_kernel->type_string(),
-                                  op_kernel->IsExpensive());
+  tracing::ScopedActivity activity(op_kernel->name(), op_kernel->type_string(),
+                                   op_kernel->IsExpensive());
   op_kernel->ComputeAsync(context, done);
 }
 
@@ -285,8 +294,7 @@ Status XlaDevice::MakeTensorFromProto(const TensorProto& tensor_proto,
     Tensor copy(GetAllocator(alloc_attrs), parsed.dtype(), parsed.shape());
     Notification n;
     TF_ASSIGN_OR_RETURN(se::Stream * stream, GetStream());
-    XlaTransferManager manager(stream, tensor_info_manager_.get(),
-                               transfer_as_literal_);
+    XlaTransferManager manager(stream, client(), transfer_as_literal_);
     manager.CopyCPUTensorToDevice(&parsed, this, &copy,
                                   [&n, &status](const Status& s) {
                                     status = s;

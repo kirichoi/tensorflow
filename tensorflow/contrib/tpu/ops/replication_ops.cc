@@ -27,6 +27,7 @@ REGISTER_OP("TPUReplicateMetadata")
     .Attr("topology: string = \"\"")
     .Attr("device_assignment: list(int) = []")
     .Attr("computation_shape: list(int) = []")
+    .Attr("host_compute_core: list(string) = []")
     .SetShapeFn(shape_inference::UnknownShape);
 
 REGISTER_OP("TPUReplicatedInput")
@@ -63,11 +64,16 @@ REGISTER_OP("TPUReplicatedOutput")
         "Operator that connects the output of an N-way replicated TPU "
         "computation to N separate outputs.");
 
+REGISTER_OP("TPUCompilationResult")
+    .Output("output: string")
+    .SetShapeFn(shape_inference::ScalarShape);
+
 REGISTER_OP("TPUReplicate")
     .Attr("computation: func")
     .Attr("num_replicas: int >= 1")
     .Attr("topology: string = \"\"")
     .Attr("device_assignment: list(int) = []")
+    .Attr("host_compute_core: list(string) = []")
     .Attr("computation_shape: list(int) = []")
     .Attr("Tinputs: list(type) >= 0")
     .Attr("Tbroadcast_inputs: list(type) >= 0")

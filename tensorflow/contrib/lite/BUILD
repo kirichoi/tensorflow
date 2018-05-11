@@ -6,8 +6,6 @@ licenses(["notice"])  # Apache 2.0
 
 load("//tensorflow/contrib/lite:build_def.bzl", "tflite_copts", "gen_selected_ops")
 
-exports_files(["LICENSE"])
-
 exports_files(glob([
     "testdata/*.bin",
     "testdata/*.pb",
@@ -89,7 +87,10 @@ cc_library(
     hdrs = [
         "builtin_op_data.h",
     ],
+    deps = [":context"],
 )
+
+exports_files(["builtin_ops.h"])
 
 cc_library(
     name = "string",
@@ -133,10 +134,11 @@ cc_library(
         ":schema_fbs_version",
         ":simple_memory_arena",
         ":util",
+        "//tensorflow/contrib/lite/kernels:eigen_support",
         "//tensorflow/contrib/lite/kernels:gemm_support",
         "//tensorflow/contrib/lite/nnapi:nnapi_lib",
+        "//tensorflow/contrib/lite/profiling:profiler",
         "//tensorflow/contrib/lite/schema:schema_fbs",
-        "//tensorflow/core:lib_platform",
     ],
 )
 
@@ -271,18 +273,3 @@ cc_test(
 #        ],
 #    }),
 #)
-
-filegroup(
-    name = "all_files",
-    srcs = glob(
-        ["**/*"],
-        exclude = [
-            "**/METADATA",
-            "**/OWNERS",
-            "downloads",
-            "examples",
-            "gen",
-        ],
-    ),
-    visibility = ["//tensorflow:__subpackages__"],
-)

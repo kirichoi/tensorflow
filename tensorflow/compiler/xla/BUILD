@@ -99,6 +99,7 @@ cc_library(
     hdrs = ["service_interface.h"],
     visibility = [":friends"],
     deps = [
+        ":xla_data_proto",
         ":xla_proto",
         "//tensorflow/core:lib",
     ],
@@ -443,6 +444,9 @@ cc_library(
     srcs = ["executable_run_options.cc"],
     hdrs = ["executable_run_options.h"],
     visibility = ["//visibility:public"],
+    deps = [
+        ":types",
+    ],
 )
 
 cc_library(
@@ -602,8 +606,8 @@ cc_library(
         ":util",
         ":window_util",
         ":xla_data_proto",
-        "//tensorflow/compiler/xla/client:computation_builder",
         "//tensorflow/compiler/xla/client:padding",
+        "//tensorflow/compiler/xla/client/xla_client:xla_builder",
         "//tensorflow/compiler/xla/service:hlo",
         "//tensorflow/compiler/xla/service:hlo_evaluator",
         "//tensorflow/compiler/xla/service:shape_inference",
@@ -653,18 +657,6 @@ tf_cc_test(
 )
 
 # -----------------------------------------------------------------------------
-
-filegroup(
-    name = "all_files",
-    srcs = glob(
-        ["**/*"],
-        exclude = [
-            "**/METADATA",
-            "**/OWNERS",
-        ],
-    ),
-    visibility = ["//tensorflow:__subpackages__"],
-)
 
 # This is a headers target that extra XLA devices can use to prevent circular dependencies.  Devices that are compiled as separate shared objects can also use it to prevent linking of library code.
 cc_header_only_library(
